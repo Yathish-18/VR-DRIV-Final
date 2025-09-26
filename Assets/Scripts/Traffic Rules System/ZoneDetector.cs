@@ -105,17 +105,21 @@ public class DrivingZoneDetector : MonoBehaviour
             {
                 Gizmos.DrawWireCube(box.center, box.size);
 
-                // Draw zone label
+                // FIXED: Only draw labels in editor
+#if UNITY_EDITOR
                 UnityEditor.Handles.Label(transform.position + Vector3.up * 2f,
                     $"{zoneName}\n{zoneSpeedLimit} km/h");
+#endif
             }
             else if (col is SphereCollider sphere)
             {
                 Gizmos.DrawWireSphere(sphere.center, sphere.radius);
 
-                // Draw zone label
+                // FIXED: Only draw labels in editor
+#if UNITY_EDITOR
                 UnityEditor.Handles.Label(transform.position + Vector3.up * 2f,
                     $"{zoneName}\n{zoneSpeedLimit} km/h");
+#endif
             }
         }
         else

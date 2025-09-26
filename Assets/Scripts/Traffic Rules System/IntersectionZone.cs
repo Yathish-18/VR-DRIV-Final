@@ -1,5 +1,6 @@
 using UnityEngine;
 using NWH.VehiclePhysics2;
+
 [RequireComponent(typeof(Collider))]
 public class IntersectionZone : MonoBehaviour
 {
@@ -55,8 +56,10 @@ public class IntersectionZone : MonoBehaviour
             Gizmos.DrawWireSphere(sphere.center, sphere.radius);
         }
 
-        // Draw intersection label
+        // FIXED: Only draw labels in editor
+#if UNITY_EDITOR
         Vector3 labelPos = transform.position + Vector3.up * 3f;
         UnityEditor.Handles.Label(labelPos, $"INTERSECTION\n{intersectionName}");
+#endif
     }
 }
