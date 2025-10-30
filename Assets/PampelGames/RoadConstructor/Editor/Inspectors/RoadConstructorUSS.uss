@@ -1,0 +1,113 @@
+.TopSetupGroup {
+    padding-left: 0;
+    padding-right: 0;
+    padding-top: 5px;
+    padding-bottom: 5px;
+    margin-top: 3px;
+    margin-right: 0;
+    margin-bottom: 3px;
+    margin-left: 0;
+}
+
+.settingsHeaderLabel {
+    margin-bottom: 9px;
+    -unity-font-style: bold;
+    margin-top: 6px;
+    font-size: 14px;
+}
+
+.settingsLabel {
+    margin-bottom: 2px;
+    -unity-font-style: bold;
+    margin-top: 12px;
+    font-size: 14px;
+}
+
+.button {
+    flex-grow: 1;
+    padding-top: 6px;
+    padding-right: 6px;
+    padding-bottom: 6px;
+    padding-left: 6px;
+}
+
+.infoLabel {
+    border-top-width: 1px;
+    border-right-width: 1px;
+    border-bottom-width: 1px;
+    border-left-width: 1px;
+    margin-top: 3px;
+    margin-right: 3px;
+    margin-bottom: 3px;
+    margin-left: 3px;
+    padding-top: 2px;
+    padding-right: 2px;
+    padding-bottom: 2px;
+    padding-left: 2px;
+    border-left-color: rgb(36, 36, 36);
+    border-right-color: rgb(36, 36, 36);
+    border-top-color: rgb(36, 36, 36);
+    border-bottom-color: rgb(36, 36, 36);
+    border-top-left-radius: 2px;
+    border-top-right-radius: 2px;
+    border-bottom-right-radius: 2px;
+    border-bottom-left-radius: 2px;
+}
+
+.toolbar {
+    justify-content: space-between;
+    height: auto;
+    border-top-width: 0;
+    border-right-width: 0;
+    border-bottom-width: 0;
+    border-left-width: 0;
+    margin-top: 3px;
+    margin-right: 0;
+    margin-bottom: 3px;
+    margin-left: 0;
+    opacity: 1;
+    background-color: rgb(56, 56, 56);
+}
+
+.toolbarButton {
+    padding-top: 0;
+    padding-right: 0;
+    padding-bottom: 0;
+    padding-left: 0;
+    margin-top: 0;
+    margin-right: 0;
+    margin-bottom: 0;
+    margin-left: 0;
+    justify-content: center;
+    align-items: center;
+    border-top-width: 1px;
+    border-right-width: 1px;
+    border-bottom-width: 1px;
+    border-left-width: 1px;
+    -unity-text-align: middle-center;
+}
+
+.toolbarButtonImage {
+    width: 24px;
+    height: 24px;
+    -unity-background-scale-mode: stretch-to-fill;
+    margin-top: 2px;
+    margin-right: 2px;
+    margin-bottom: 2px;
+    margin-left: 2px;
+    -unity-background-image-tint-color: rgb(236, 236, 236);
+}
+
+.constructionToolbarButton {
+    padding-right: 6px;
+    padding-left: 6px;
+    margin-right: 0;
+    border-top-width: 1px;
+    border-right-width: 1px;
+    border-bottom-width: 1px;
+    border-left-width: 1px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    height: 33px;
+    -unity-text-align: middle-center;
+}

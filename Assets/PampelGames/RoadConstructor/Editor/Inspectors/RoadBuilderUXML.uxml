@@ -1,0 +1,93 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" xsi="http://www.w3.org/2001/XMLSchema-instance" engine="UnityEngine.UIElements" editor="UnityEditor.UIElements" noNamespaceSchemaLocation="../../../../../UIElementsSchema/UIElements.xsd" editor-extension-mode="True">
+    <Style src="project://database/Assets/PampelGames/RoadConstructor/Editor/Inspectors/RoadConstructorUSS.uss?fileID=7433441132597879392&amp;guid=85a50d6faf508cd49a3cfe6cef06651f&amp;type=3#RoadConstructorUSS" />
+    <Style src="project://database/Assets/PampelGames/Shared/Utility/UIToolkit/StyleSheets/InspectorUSS.uss?fileID=7433441132597879392&amp;guid=a67aab0cbc3193846a6c4c491a7d7663&amp;type=3#InspectorUSS" />
+    <ui:VisualElement name="RoadBuilder" style="flex-grow: 1;">
+        <ui:VisualElement name="Settings" style="flex-grow: 1; margin-bottom: 6px;">
+            <uie:Toolbar name="TopToolbar" class="toolbar">
+                <ui:VisualElement name="LeftSide" style="flex-grow: 0; flex-direction: row;">
+                    <uie:ToolbarToggle focusable="false" name="roadConstructorSetup" class="toolbarButton">
+                        <ui:VisualElement name="roadConstructorSetupImage" class="toolbarButtonImage" style="background-image: url(&quot;project://database/Assets/PampelGames/RoadConstructor/Editor/Icons/ToolSettings.png?fileID=2800000&amp;guid=e78314a2a6328e648a13105c1df94ab9&amp;type=3#ToolSettings&quot;); width: 30px; height: 30px;" />
+                    </uie:ToolbarToggle>
+                </ui:VisualElement>
+                <ui:VisualElement name="RightSide" style="flex-direction: row; align-items: flex-start;">
+                    <uie:ToolbarButton parse-escape-sequences="true" display-tooltip-when-elided="true" name="documentation" class="toolbarButton">
+                        <ui:VisualElement name="documentationImage" class="toolbarButtonImage" style="background-image: url(&quot;project://database/Assets/PampelGames/Shared/Editor/Icons/DocumentationIcon.png?fileID=2800000&amp;guid=893673826e0094443bd45b4020d06618&amp;type=3#DocumentationIcon&quot;); -unity-background-scale-mode: stretch-to-fill; -unity-background-image-tint-color: rgb(236, 236, 236);" />
+                    </uie:ToolbarButton>
+                </ui:VisualElement>
+            </uie:Toolbar>
+            <ui:GroupBox name="RoadConstructorGroup" class="TopSetupGroup">
+                <uie:ObjectField label="Road Constructor" name="roadConstructor" />
+                <uie:ObjectField label="Pointer" name="pointerPrefab" binding-path="pointerPrefab" type="UnityEngine.GameObject, UnityEngine.CoreModule" />
+                <uie:ObjectField label="Pointer Demolish" name="pointerDemolishPrefab" binding-path="pointerDemolishPrefab" type="UnityEngine.GameObject, UnityEngine.CoreModule" />
+                <ui:VisualElement name="Hotkeys" class="drawTopLine" style="flex-grow: 1;">
+                    <ui:EnumField label="+ Height" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="increaseHeight" />
+                    <ui:EnumField label="- Height" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="decreaseHeight" />
+                    <ui:EnumField label="+ Radius" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="increaseRadius" />
+                    <ui:EnumField label="- Radius" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="decreaseRadius" />
+                    <ui:FloatField label="Delta Speed" value="42,2" name="deltaSpeed" />
+                    <ui:EnumField label="Fix Tangent 01" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="fixTangent1" />
+                    <ui:EnumField label="Fix Tangent 02" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="fixTangent2" />
+                    <ui:EnumField label="Detach Road" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="detachRoad" />
+                </ui:VisualElement>
+                <ui:VisualElement name="Other" class="drawTopLine" style="flex-grow: 1;">
+                    <ui:Toggle label="Continuous" name="continuous" />
+                </ui:VisualElement>
+            </ui:GroupBox>
+        </ui:VisualElement>
+        <ui:VisualElement name="InitializeButtons" style="flex-direction: row;">
+            <ui:Button text="Initialize" parse-escape-sequences="true" display-tooltip-when-elided="true" name="initializeButton" class="button" style="height: 27px;" />
+            <ui:Button text="Uninitialize" parse-escape-sequences="true" display-tooltip-when-elided="true" name="uninitializeButton" style="flex-grow: 1; height: 27px;" />
+        </ui:VisualElement>
+        <ui:VisualElement name="Initialized" style="flex-grow: 1;">
+            <ui:VisualElement name="ProjectButtons" style="flex-grow: 1;">
+                <ui:Button text="Register Scene Objects" parse-escape-sequences="true" display-tooltip-when-elided="true" name="registerSceneObjectsButton" style="height: 27px;" />
+                <ui:Foldout text="Post Construction Options" value="false" name="MoreOptionsFoldout" style="margin-top: 6px;">
+                    <ui:Button text="Add Traffic Components" parse-escape-sequences="true" display-tooltip-when-elided="true" name="createTrafficLanesButton" style="height: 17px; margin-top: 6px;" />
+                    <ui:Button text="Create Waypoints" parse-escape-sequences="true" display-tooltip-when-elided="true" name="createWaypointsButton" style="height: 17px;" />
+                    <ui:Button text="Remove Traffic System" parse-escape-sequences="true" display-tooltip-when-elided="true" name="removeTrafficSystemButton" style="height: 17px; margin-bottom: 6px;" />
+                    <ui:Button text="Update Colliders" parse-escape-sequences="true" display-tooltip-when-elided="true" name="updateCollidersButton" style="height: 17px;" />
+                    <ui:Button text="Update Layers/Tags" parse-escape-sequences="true" display-tooltip-when-elided="true" name="updateLayersTagsButton" style="height: 17px;" />
+                    <ui:Button text="Clean Up Connections" parse-escape-sequences="true" display-tooltip-when-elided="true" name="cleanUpConnectionsButton" style="height: 17px; margin-top: 6px;" />
+                    <ui:Button text="Recreate Road System" parse-escape-sequences="true" display-tooltip-when-elided="true" name="recreateRoadSystemButton" style="height: 17px; margin-top: 6px;" />
+                </ui:Foldout>
+                <ui:Foldout text="Export Mesh" name="ExportFoldout" value="false" style="margin-bottom: 3px; margin-top: 3px;">
+                    <ui:Toggle label="Check For Existing" name="checkExistingMeshes" />
+                    <ui:Button text="Export Meshes" parse-escape-sequences="true" display-tooltip-when-elided="true" name="exportButton" style="height: 27px;" />
+                </ui:Foldout>
+            </ui:VisualElement>
+            <ui:VisualElement name="InfoLabels" style="flex-grow: 1;">
+                <ui:Label tabindex="-1" parse-escape-sequences="true" display-tooltip-when-elided="true" name="constructionFails" class="infoLabel" style="color: rgb(255, 127, 127);" />
+                <ui:Label tabindex="-1" parse-escape-sequences="true" display-tooltip-when-elided="true" name="buildingParameter" class="infoLabel" />
+                <ui:Label tabindex="-1" parse-escape-sequences="true" display-tooltip-when-elided="true" name="constructionData" class="infoLabel" />
+            </ui:VisualElement>
+            <ui:GroupBox name="ConstructionButtons" style="flex-direction: row; justify-content: space-between; align-self: auto;">
+                <ui:VisualElement name="ConstructionButtonsLeft">
+                    <uie:ToolbarToggle label="Road" name="road" class="constructionToolbarButton" />
+                    <uie:ToolbarToggle label="Roundabout" name="roundabout" class="constructionToolbarButton" />
+                    <uie:ToolbarToggle label="Ramp" name="ramp" class="constructionToolbarButton" />
+                </ui:VisualElement>
+                <ui:VisualElement name="ConstructionButtonsCenter">
+                    <uie:ToolbarToggle label="Demolish" name="demolish" class="constructionToolbarButton" />
+                    <uie:ToolbarToggle label="Move" name="move" class="constructionToolbarButton" />
+                    <uie:ToolbarToggle label="Reverse" name="reverseDirection" class="constructionToolbarButton" />
+                </ui:VisualElement>
+                <ui:VisualElement name="ConstructionButtonsRight">
+                    <uie:ToolbarButton text="Undo" parse-escape-sequences="true" display-tooltip-when-elided="true" name="undo" class="constructionToolbarButton" />
+                </ui:VisualElement>
+            </ui:GroupBox>
+            <ui:Label tabindex="-1" text="Label" parse-escape-sequences="true" display-tooltip-when-elided="true" name="constructionInfoLabel" style="-unity-font-style: bold; font-size: 14px; -unity-text-align: middle-center; border-top-width: 3px; border-right-width: 3px; border-bottom-width: 3px; border-left-width: 3px; border-top-left-radius: 3px; border-top-right-radius: 3px; border-bottom-right-radius: 3px; border-bottom-left-radius: 3px; border-left-color: rgb(36, 36, 36); border-right-color: rgb(36, 36, 36); border-top-color: rgb(36, 36, 36); border-bottom-color: rgb(36, 36, 36); padding-top: 3px; padding-bottom: 3px;" />
+            <ui:GroupBox name="RoadTypeSelection" style="padding-bottom: 0; margin-bottom: 0; justify-content: space-between; padding-top: 0; margin-top: 6px;">
+                <ui:FloatField label="Delta Height" value="42,2" name="deltaHeight" />
+                <ui:EnumField label="Design" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="roundAboutDesign" />
+                <ui:FloatField label="Radius" value="42,2" name="roundAboutRadius" />
+                <ui:GroupBox name="RoadTypeSettings" style="padding-top: 0; margin-top: 3px;">
+                    <ui:EnumField label="Connections" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="directConnection" />
+                    <ui:Slider label="Tangent Length" high-value="1" name="tangentLength" show-input-field="true" />
+                    <ui:Toggle label="Parallel Road" name="parallelRoad" />
+                    <ui:FloatField label="Parallel Distance" value="42,2" name="parallelDistance" />
+                </ui:GroupBox>
+            </ui:GroupBox>
+            <ui:GroupBox name="Roads" style="padding-top: 0;" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

@@ -1,0 +1,71 @@
+VisualElement {
+}
+
+.button {
+    width: 125px;
+    height: 85px;
+    border-top-left-radius: 20px;
+    border-top-right-radius: 20px;
+    border-bottom-right-radius: 20px;
+    border-bottom-left-radius: 20px;
+    -unity-font-style: normal;
+    font-size: 24px;
+    margin-right: 10px;
+    margin-left: 10px;
+}
+
+.button:hover {
+    transition-property: scale;
+    scale: 1.1 1.1;
+    transition-duration: 0.2s;
+}
+
+.buttonSelected {
+    -unity-font-style: bold;
+}
+
+.infoLabel {
+    -unity-font-style: normal;
+    font-size: 24px;
+    -unity-text-align: middle-left;
+    border-top-width: 6px;
+    border-right-width: 6px;
+    border-bottom-width: 6px;
+    border-left-width: 6px;
+    border-left-color: rgb(0, 0, 0);
+    border-right-color: rgb(0, 0, 0);
+    border-top-color: rgb(0, 0, 0);
+    border-bottom-color: rgb(0, 0, 0);
+    padding-top: 6px;
+    padding-right: 6px;
+    padding-bottom: 6px;
+    padding-left: 6px;
+    color: rgb(255, 255, 255);
+    margin-top: 6px;
+    margin-right: 6px;
+    margin-bottom: 6px;
+    margin-left: 6px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    border-bottom-left-radius: 6px;
+    align-self: flex-start;
+}
+
+.menuPanel {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    border-top-width: 4px;
+    border-right-width: 4px;
+    border-bottom-width: 4px;
+    border-left-width: 4px;
+    border-left-color: rgb(33, 36, 64);
+    border-right-color: rgb(33, 36, 64);
+    border-top-color: rgb(33, 36, 64);
+    border-bottom-color: rgb(33, 36, 64);
+    padding-top: 12px;
+    padding-right: 12px;
+    padding-bottom: 12px;
+    padding-left: 12px;
+}

@@ -1,0 +1,20 @@
+{
+    "name": "PG.Shared.Construction.Editor",
+    "rootNamespace": "",
+    "references": [
+        "GUID:c568eff07a2e2724d8f686970df4276e",
+        "GUID:505acd845f128ec4e9cda71aaca7f08c",
+        "GUID:cacf6919936d366458662cc767f4276d"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

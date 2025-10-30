@@ -1,0 +1,172 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" xsi="http://www.w3.org/2001/XMLSchema-instance" engine="UnityEngine.UIElements" editor="UnityEditor.UIElements" noNamespaceSchemaLocation="../../../../../UIElementsSchema/UIElements.xsd" editor-extension-mode="True">
+    <Style src="project://database/Assets/PampelGames/RoadConstructor/Editor/Inspectors/RoadConstructorUSS.uss?fileID=7433441132597879392&amp;guid=85a50d6faf508cd49a3cfe6cef06651f&amp;type=3#RoadConstructorUSS" />
+    <Style src="project://database/Assets/PampelGames/Shared/Utility/UIToolkit/StyleSheets/InspectorUSS.uss?fileID=7433441132597879392&amp;guid=a67aab0cbc3193846a6c4c491a7d7663&amp;type=3#InspectorUSS" />
+    <ui:VisualElement name="RoadConstructor" style="flex-grow: 1;">
+        <ui:VisualElement name="Settings" style="flex-grow: 1; margin-bottom: 6px;">
+            <uie:Toolbar name="TopToolbar" class="toolbar">
+                <ui:VisualElement name="LeftSide" style="flex-grow: 0; flex-direction: row;">
+                    <uie:ToolbarToggle focusable="false" name="componentSettingsToggle" class="toolbarButton">
+                        <ui:VisualElement name="detailSettingsImage" class="toolbarButtonImage" style="background-image: url(&quot;project://database/Assets/PampelGames/RoadConstructor/Editor/Icons/ToolSettings.png?fileID=2800000&amp;guid=e78314a2a6328e648a13105c1df94ab9&amp;type=3#ToolSettings&quot;); width: 30px; height: 30px;" />
+                    </uie:ToolbarToggle>
+                    <uie:ToolbarToggle focusable="false" name="roadSetToggle" class="toolbarButton" style="margin-left: 2px;">
+                        <ui:VisualElement name="roadSetImage" class="toolbarButtonImage" style="background-image: url(&quot;project://database/Assets/PampelGames/RoadConstructor/Editor/Icons/ConstructionSetIcon.png?fileID=2800000&amp;guid=48ac7e5c68de7ef4a989d4336ab5d2b7&amp;type=3#ConstructionSetIcon&quot;); width: 30px; height: 30px;" />
+                    </uie:ToolbarToggle>
+                    <uie:ToolbarToggle focusable="false" name="integrationsToggle" class="toolbarButton" style="margin-left: 2px;">
+                        <ui:VisualElement name="integrationsImage" class="toolbarButtonImage" style="background-image: url(&quot;project://database/Assets/PampelGames/Shared.Construction/Editor/Icons/IntegrationsIcon.png?fileID=2800000&amp;guid=47ae060dcbd8adc489c2b5f45c9a2f6c&amp;type=3#IntegrationsIcon&quot;); width: 30px; height: 30px;" />
+                    </uie:ToolbarToggle>
+                </ui:VisualElement>
+                <ui:VisualElement name="RightSide" style="flex-direction: row; align-self: flex-start;">
+                    <uie:ToolbarButton parse-escape-sequences="true" display-tooltip-when-elided="true" name="documentation" class="toolbarButton">
+                        <ui:VisualElement name="documentationImage" class="toolbarButtonImage" style="background-image: url(&quot;project://database/Assets/PampelGames/Shared/Editor/Icons/DocumentationIcon.png?fileID=2800000&amp;guid=893673826e0094443bd45b4020d06618&amp;type=3#DocumentationIcon&quot;); -unity-background-scale-mode: stretch-to-fill; -unity-background-image-tint-color: rgb(236, 236, 236);" />
+                    </uie:ToolbarButton>
+                </ui:VisualElement>
+            </uie:Toolbar>
+            <ui:GroupBox name="ComponentSettingsGroup" class="TopSetupGroup" style="padding-right: 0; padding-left: 0;">
+                <ui:Label tabindex="-1" text="Component Settings" parse-escape-sequences="true" display-tooltip-when-elided="true" name="componentSettingsLabel" class="settingsHeaderLabel" style="align-self: center;" />
+                <ui:VisualElement name="ComponentSettings" style="flex-grow: 1;">
+                    <ui:VisualElement name="ComponentQuality" style="flex-grow: 1;">
+                        <ui:Label tabindex="-1" text="Quality" parse-escape-sequences="true" display-tooltip-when-elided="true" name="componentQualityLabel" class="settingsLabel" />
+                        <ui:IntegerField label="Resolution" value="42" name="resolution" />
+                        <ui:IntegerField label="Detail Resolution" value="42" name="detailResolution" />
+                        <ui:Toggle label="Smart Reduce" name="smartReduce" style="top: 2px;" />
+                        <ui:EnumField label="Collider" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="addCollider" />
+                        <uie:LayerField label="Road Layer" name="addColliderLayer" />
+                        <uie:TagField label="Road Tag" value="Player" name="roadTag" />
+                        <ui:ListView name="lodList" header-title="LOD" show-foldout-header="true" />
+                    </ui:VisualElement>
+                    <ui:VisualElement name="ComponentConstruction" style="flex-grow: 1;">
+                        <ui:Label tabindex="-1" text="Construction" parse-escape-sequences="true" display-tooltip-when-elided="true" name="componentConstructionLabel" class="settingsLabel" />
+                        <ui:VisualElement name="Grid" class="drawBottomLine" style="flex-grow: 1;">
+                            <ui:FloatField label="Base Height" value="42,2" name="baseRoadHeight" />
+                            <ui:Vector3Field label="Grid" name="grid" />
+                            <ui:Vector3Field label="Grid Offset" name="gridOffset" />
+                        </ui:VisualElement>
+                        <ui:VisualElement name="Snap" class="drawBottomLine" style="flex-grow: 1;">
+                            <ui:FloatField label="Snap Distance" value="42,2" name="snapDistance" />
+                            <ui:FloatField label="Snap Height" value="42,2" name="snapHeight" />
+                            <ui:FloatField label="Snap Angle" value="42,2" name="snapAngleIntersection" />
+                        </ui:VisualElement>
+                        <ui:VisualElement name="Angles" class="drawBottomLine" style="flex-grow: 1;">
+                            <ui:FloatField label="Min. Angle Int." value="42,2" name="minAngleIntersection" />
+                            <uie:CurveField label="Dist. / Angle Road" name="distanceRatioAngleCurve" />
+                        </ui:VisualElement>
+                        <ui:VisualElement name="Other" style="flex-grow: 1;">
+                            <ui:EnumField label="Road UV" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="splineLengthUV" />
+                            <ui:Slider label="Tangent Length" high-value="1" name="tangentLength" show-input-field="true" />
+                            <ui:FloatField label="Intersection Dist." value="42,2" name="intersectionDistance" />
+                            <ui:EnumField label="Connections" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="directConnection" />
+                            <ui:EnumField label="Road End" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="roadEnd" />
+                        </ui:VisualElement>
+                    </ui:VisualElement>
+                    <ui:VisualElement name="ComponentVerification" style="flex-grow: 1;">
+                        <ui:Label tabindex="-1" text="Verification" parse-escape-sequences="true" display-tooltip-when-elided="true" name="componentVerificationLabel" class="settingsLabel" />
+                        <ui:Vector2Field label="Road Length" name="roadLength" />
+                        <ui:FloatField label="Min. Overlap Dist." value="42,2" name="minOverlapDistance" />
+                        <ui:FloatField label="Max. Curvature" value="42,2" name="maxCurvature" />
+                    </ui:VisualElement>
+                    <ui:VisualElement name="ComponentUndoDemolish" style="flex-grow: 1;">
+                        <ui:Label tabindex="-1" text="Undo / Demolish" parse-escape-sequences="true" display-tooltip-when-elided="true" name="componentUndoDemolishLabel" class="settingsLabel" />
+                        <ui:IntegerField label="Undo Storage Size" value="42" name="undoStorageSize" />
+                        <ui:Toggle label="Undo Terrain" name="undoResetsTerrain" style="top: 1px;" />
+                        <ui:Toggle label="Demolish Terrain" name="demolishResetsTerrain" />
+                    </ui:VisualElement>
+                    <ui:VisualElement name="ComponentElevation" style="flex-grow: 1;">
+                        <ui:Label tabindex="-1" text="Elevation" parse-escape-sequences="true" display-tooltip-when-elided="true" name="componentElevationLabel" class="settingsLabel" />
+                        <uie:LayerMaskField label="Ground Layers" name="groundLayers" />
+                        <ui:Vector2Field label="Height Range" name="heightRange" />
+                        <ui:FloatField label="Elevation Height" value="42,2" name="elevationStartHeight" />
+                        <ui:Toggle label="Elev. Intersections" name="elevatedIntersections" style="top: 2px;" />
+                        <ui:FloatField label="Min. Overlap Height" value="42,2" name="minOverlapHeight" />
+                        <ui:FloatField label="Max. Slope" value="42,2" name="maxSlope" />
+                        <ui:Toggle label="Smooth Elevation" name="smoothSlope" style="top: 2px;" />
+                    </ui:VisualElement>
+                    <ui:VisualElement name="ComponentTerrain" style="flex-grow: 1;">
+                        <ui:Label tabindex="-1" text="Terrain" parse-escape-sequences="true" display-tooltip-when-elided="true" name="terrainLabel" class="settingsLabel" />
+                        <ui:VisualElement name="Terrain" style="flex-grow: 1;">
+                            <ui:Toggle label="Terrain Settings" name="terrainSettings" style="top: 2px;" />
+                            <ui:VisualElement name="TerrainFields" style="flex-grow: 1;">
+                                <uie:ObjectField label="Terrain (Obsolete)" name="terrain" type="UnityEngine.Terrain, UnityEngine.TerrainModule" style="opacity: 0.5;" />
+                                <uie:PropertyField name="terrains" />
+                                <ui:Toggle label="Remove Details" name="removeDetails" style="top: 2px;" />
+                                <ui:Toggle label="Remove Trees" name="removeTrees" style="top: 2px;" />
+                                <ui:Toggle label="Level Height" name="levelHeight" style="top: 2px;" />
+                                <ui:VisualElement name="LevelTerrainHeight" style="flex-grow: 1;">
+                                    <ui:VisualElement name="slopeTextureIndexWrapper" style="flex-grow: 1; flex-direction: row;">
+                                        <ui:IntegerField label="Slope Texture" value="42" name="slopeTextureIndex" style="flex-grow: 0.1;" />
+                                        <ui:TextField picking-mode="Ignore" value="filler text" name="slopeTextureName" readonly="true" style="flex-grow: 1;" />
+                                    </ui:VisualElement>
+                                    <ui:Slider label="Texture Strength" high-value="1" name="slopeTextureStrength" show-input-field="true" />
+                                    <ui:SliderInt label="Slope Smooth" high-value="5" name="slopeSmooth" show-input-field="true" />
+                                </ui:VisualElement>
+                            </ui:VisualElement>
+                        </ui:VisualElement>
+                    </ui:VisualElement>
+                    <ui:VisualElement name="ComponentTrafficSystem" style="flex-grow: 1;">
+                        <ui:Label tabindex="-1" text="Traffic System" parse-escape-sequences="true" display-tooltip-when-elided="true" name="trafficSystemLabel" class="settingsLabel" />
+                        <ui:Toggle label="Add Traffic Comp." name="addTrafficComponent" />
+                        <ui:VisualElement name="TrafficSystemFields" style="flex-grow: 1;">
+                            <ui:Toggle label="Update Waypoints" name="updateWaypoints" />
+                            <ui:Vector2Field label="Waypoint Distance" name="waypointDistance" />
+                        </ui:VisualElement>
+                        <ui:EnumField label="Waypoint Gizmos" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="waypointGizmos" />
+                        <ui:VisualElement name="WaypointGizmosFields" style="flex-grow: 1; margin-left: 6px;">
+                            <ui:EnumField label="Color" type="UnityEngine.TextAlignment, UnityEngine.TextRenderingModule" value="Center" name="waypointGizmosColor" />
+                            <ui:FloatField label="Size" value="42,2" name="waypointGizmoSize" />
+                            <ui:Toggle label="Start/End Only" name="waypointConnectionsOnly" style="top: 2px;" />
+                        </ui:VisualElement>
+                    </ui:VisualElement>
+                </ui:VisualElement>
+            </ui:GroupBox>
+            <ui:GroupBox name="RoadSetSettingsGroup" class="TopSetupGroup">
+                <ui:Label tabindex="-1" text="Road Set" parse-escape-sequences="true" display-tooltip-when-elided="true" name="roadSetLabel" class="settingsHeaderLabel" style="align-self: center;" />
+                <ui:VisualElement name="RoadSetWrapper" style="flex-direction: row; align-items: center;">
+                    <uie:ObjectField label="Road Set" name="roadSet" binding-path="_RoadSet" style="flex-shrink: 1;" />
+                    <ui:Button text="New Set" parse-escape-sequences="true" display-tooltip-when-elided="true" name="createNewSet" style="flex-grow: 1; margin-top: 6px; margin-right: 6px; margin-bottom: 6px; margin-left: 6px;" />
+                </ui:VisualElement>
+                <ui:VisualElement name="Construction" style="flex-grow: 1;">
+                    <ui:GroupBox name="RoadPreview" style="border-top-width: 5px; border-right-width: 5px; border-bottom-width: 5px; border-left-width: 5px; border-left-color: rgb(32, 32, 32); border-right-color: rgb(32, 32, 32); border-top-color: rgb(32, 32, 32); border-bottom-color: rgb(32, 32, 32); margin-bottom: 8px; padding-right: 3px; border-top-left-radius: 5px; border-top-right-radius: 5px; border-bottom-right-radius: 5px; border-bottom-left-radius: 5px;">
+                        <ui:Label tabindex="-1" text="Road Preview" parse-escape-sequences="true" display-tooltip-when-elided="true" name="roadPreviewLabel" class="settingsHeaderLabel" style="-unity-text-align: middle-center;" />
+                        <ui:FloatField label="Length" value="42,2" name="roadPreviewLength" />
+                        <ui:Toggle label="Spawn Objects" name="roadPreviewSpawnObjects" style="top: 2px;" />
+                        <ui:Toggle label="Elevated" name="roadPreviewElevated" style="top: 2px;" />
+                        <ui:VisualElement name="RoadPreviewButtons" style="flex-grow: 1; flex-direction: row; margin-top: 3px;">
+                            <ui:Button text="Create/Update" parse-escape-sequences="true" display-tooltip-when-elided="true" name="createPreviewButton" class="button" />
+                            <ui:Button text="Focus" parse-escape-sequences="true" display-tooltip-when-elided="true" name="focusPreviewButton" class="button" />
+                            <ui:Button text="Remove" parse-escape-sequences="true" display-tooltip-when-elided="true" name="removePreviewButton" class="button" />
+                        </ui:VisualElement>
+                    </ui:GroupBox>
+                    <uie:Toolbar name="PartsToolbar" style="height: auto; border-top-width: 1px; border-right-width: 1px; border-bottom-width: 1px; border-left-width: 1px; align-self: auto; justify-content: space-between;">
+                        <ui:VisualElement name="LeftSideWrapper" style="flex-direction: row;">
+                            <uie:ToolbarToggle focusable="false" value="false" name="roadsToggle">
+                                <ui:VisualElement name="roadsImage" style="background-image: url(&quot;project://database/Assets/PampelGames/RoadConstructor/Editor/Icons/RoadIcon.png?fileID=2800000&amp;guid=a313c4fd1c010004fa7168014925e112&amp;type=3#RoadIcon&quot;); -unity-background-scale-mode: stretch-to-fill; width: 45px; height: 45px;" />
+                            </uie:ToolbarToggle>
+                            <uie:ToolbarToggle focusable="false" value="false" name="lanePresetsToggle">
+                                <ui:VisualElement name="lanePresetsImage" style="background-image: url(&quot;project://database/Assets/PampelGames/RoadConstructor/Editor/Icons/TemplateIcon.png?fileID=2800000&amp;guid=ee49ab09e0d9a9249bfba5a87453e691&amp;type=3#TemplateIcon&quot;); -unity-background-scale-mode: stretch-to-fill; width: 45px; height: 45px;" />
+                            </uie:ToolbarToggle>
+                            <uie:ToolbarToggle focusable="false" value="false" name="spawnObjectPresetsToggle">
+                                <ui:VisualElement name="spawnObjectPresetsImage" style="background-image: url(&quot;project://database/Assets/PampelGames/RoadConstructor/Editor/Icons/PrefabIcon.png?fileID=2800000&amp;guid=feb50bf6fdcd6224a8938939001d7b1d&amp;type=3#PrefabIcon&quot;); -unity-background-scale-mode: stretch-to-fill; width: 45px; height: 45px; align-self: center; left: 2px;" />
+                            </uie:ToolbarToggle>
+                            <uie:ToolbarToggle focusable="false" value="false" name="trafficLanePresetsToggle">
+                                <ui:VisualElement name="trafficLanePresetsImage" style="background-image: url(&quot;project://database/Assets/PampelGames/RoadConstructor/Editor/Icons/TrafficSystemPresetIcon.png?fileID=2800000&amp;guid=b8e88308c9e8bcd40b688f81e6eea1cb&amp;type=3#TrafficSystemPresetIcon&quot;); -unity-background-scale-mode: stretch-to-fill; width: 45px; height: 45px; align-self: center; left: 2px;" />
+                            </uie:ToolbarToggle>
+                        </ui:VisualElement>
+                        <ui:VisualElement name="RightSideWrapper" style="flex-grow: 1; flex-direction: row-reverse;">
+                            <ui:VisualElement name="RightSideWrapperRoads" style="flex-direction: row;">
+                                <uie:ToolbarMenu tabindex="-1" parse-escape-sequences="true" display-tooltip-when-elided="true" name="addPartsMenu" text="+" style="-unity-font-style: bold; font-size: 21px; -unity-text-align: middle-center; width: 33px; margin-left: 0;" />
+                                <uie:ToolbarMenu tabindex="-1" parse-escape-sequences="true" display-tooltip-when-elided="true" name="partsMenu" style="border-right-width: 0;" />
+                            </ui:VisualElement>
+                        </ui:VisualElement>
+                    </uie:Toolbar>
+                    <ui:VisualElement name="RoadsParent" style="flex-grow: 1;" />
+                    <ui:VisualElement name="LanePresetsParent" style="flex-grow: 1;" />
+                    <ui:VisualElement name="SpawnObjectPresetsParent" style="flex-grow: 1;" />
+                    <ui:VisualElement name="TrafficLanePresetsParent" style="flex-grow: 1;" />
+                </ui:VisualElement>
+            </ui:GroupBox>
+            <ui:GroupBox name="IntegrationsGroup" class="TopSetupGroup" style="padding-right: 0; padding-left: 0;">
+                <ui:Label tabindex="-1" text="Integrations" parse-escape-sequences="true" display-tooltip-when-elided="true" name="integrationsLabel" class="settingsHeaderLabel" style="align-self: center;" />
+                <ui:VisualElement name="IntegrationsParent" style="flex-grow: 1;" />
+            </ui:GroupBox>
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

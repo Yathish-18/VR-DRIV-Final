@@ -1,9 +1,6 @@
-﻿using UnityEngine;
+using UnityEngine;
 using System.Collections;
 using System.Text;
-#if UNITY_EDITOR
-using UnityEditor;
-#endif
 
 namespace Logitech
 {
@@ -16,72 +13,6 @@ namespace Logitech
         private string buttonStatus;
         private string forcesLabel;
         string[] activeForceAndEffect;
-
-        // ENHANCED: Static variable management from WheelInitialiser
-        private static int activeInstances = 0;
-        private static bool globalSDKActive = false;
-        private static bool staticVariablesReset = false;
-
-        // ENHANCED: Instance tracking
-        private bool sdkInitialized = false;
-        private bool usingExistingSDK = false;
-        private bool ownedSDKInitialization = false;
-
-        // CRITICAL: Reset static variables when entering Play Mode
-#if UNITY_EDITOR
-        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
-        static void ResetStaticVariables()
-        {
-            Debug.Log("[LogitechSteeringWheel] 🔄 RESETTING STATIC VARIABLES");
-            activeInstances = 0;
-            globalSDKActive = false;
-            staticVariablesReset = true;
-        }
-
-        // Also register for Play Mode state changes as backup
-        [InitializeOnLoadMethod]
-        static void RegisterPlayModeCallback()
-        {
-            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
-        }
-
-        static void OnPlayModeStateChanged(PlayModeStateChange state)
-        {
-            if (state == PlayModeStateChange.ExitingPlayMode)
-            {
-                Debug.Log("[LogitechSteeringWheel] 🔄 Play Mode exiting - resetting static variables");
-                activeInstances = 0;
-                globalSDKActive = false;
-                staticVariablesReset = false;
-            }
-        }
-#endif
-
-        // ENHANCED: Awake with proper static variable handling
-        void Awake()
-        {
-            // FIXED: Always ensure static variables are properly initialized
-            if (!staticVariablesReset)
-            {
-                Debug.LogWarning("[LogitechSteeringWheel] ⚠️ Static variables not reset! Manually resetting...");
-                activeInstances = 0;
-                globalSDKActive = false;
-                staticVariablesReset = true;
-            }
-
-            activeInstances++;
-            Debug.Log($"[LogitechSteeringWheel] Awake - Instance: {GetInstanceID()} | Active instances: {activeInstances}");
-
-            // SAFETY CHECK: Prevent instance overflow
-            if (activeInstances > 100)
-            {
-                Debug.LogError($"[LogitechSteeringWheel] 🚨 CRITICAL: Instance count too high ({activeInstances})! This indicates a static variable reset issue.");
-                Debug.LogError("[LogitechSteeringWheel] 💡 SOLUTION: Check Project Settings > Editor > Enter Play Mode Options");
-                Debug.LogError("[LogitechSteeringWheel] 💡 Either disable 'Enter Play Mode Options' OR ensure Domain Reload is enabled");
-                // Emergency reset
-                activeInstances = 1;
-            }
-        }
 
         // Use this for initialization
         void Start()
@@ -104,176 +35,13 @@ namespace Logitech
             forcesLabel += "Soft Stop Force : O\n";
             forcesLabel += "Set example controller properties : PageUp\n";
             forcesLabel += "Play Leds : P\n";
-
             activeForceAndEffect = new string[9];
-
-            // ENHANCED: Better SDK initialization logic
-            InitializeSDK();
-        }
-
-        // ENHANCED: Smart SDK initialization
-        void InitializeSDK()
-        {
-            Debug.Log("[LogitechSteeringWheel] Starting SDK initialization process...");
-
-            // First check if SDK is already active (from another component like NWH)
-            if (TestExistingSDK())
-            {
-                Debug.Log("[LogitechSteeringWheel] ✅ Found active SDK! Using existing initialization.");
-                sdkInitialized = true;
-                usingExistingSDK = true;
-                globalSDKActive = true;
-                return;
-            }
-
-            // Initialize our own SDK if none exists
-            if (!globalSDKActive)
-            {
-                Debug.Log("[LogitechSteeringWheel] No existing SDK found, initializing our own...");
-                bool initResult = LogitechGSDK.LogiSteeringInitialize(false);
-                Debug.Log("SteeringInit:" + initResult);
-
-                if (initResult)
-                {
-                    sdkInitialized = true;
-                    ownedSDKInitialization = true;
-                    globalSDKActive = true;
-                    Debug.Log("[LogitechSteeringWheel] ✅ Successfully initialized our own SDK");
-                }
-                else
-                {
-                    Debug.LogError("Failed to initialize Logitech Steering SDK");
-                }
-            }
-            else
-            {
-                Debug.Log("SDK already initialized globally, skipping initialization");
-                sdkInitialized = true;
-                usingExistingSDK = true;
-            }
-        }
-
-        // ENHANCED: Test for existing SDK
-        bool TestExistingSDK()
-        {
-            try
-            {
-                bool updateResult = LogitechGSDK.LogiUpdate();
-                if (updateResult)
-                {
-                    bool connected = LogitechGSDK.LogiIsConnected(0);
-                    Debug.Log($"[LogitechSteeringWheel] Existing SDK test - Update: {updateResult}, Connected: {connected}");
-                    return true;
-                }
-            }
-            catch (System.Exception e)
-            {
-                Debug.Log($"[LogitechSteeringWheel] SDK test exception: {e.Message}");
-            }
-            return false;
-        }
-
-        // ENHANCED: Safe shutdown with proper instance management
-        void SafeShutdown()
-        {
-            activeInstances = Mathf.Max(0, activeInstances - 1);
-            Debug.Log($"[LogitechSteeringWheel] SafeShutdown - Instances remaining: {activeInstances} | Owned SDK: {ownedSDKInitialization}");
-
-            // Stop all forces first
-            StopAllForces();
-
-            // Don't shutdown if we're using someone else's SDK
-            if (usingExistingSDK && !ownedSDKInitialization)
-            {
-                Debug.Log("[LogitechSteeringWheel] Skipping shutdown - using existing SDK from another component");
-                return;
-            }
-
-            // Only shutdown if we initialized it ourselves and we're the last instance
-            if (activeInstances <= 0 && ownedSDKInitialization)
-            {
-                bool shouldShutdown = true;
-
-#if UNITY_EDITOR
-                // Skip shutdown in Editor to prevent crashes (configurable)
-                if (true) // You can make this a public bool field if needed
-                {
-                    Debug.Log("[LogitechSteeringWheel] Skipping shutdown in Editor to prevent crash");
-                    shouldShutdown = false;
-                }
-#endif
-
-                if (shouldShutdown)
-                {
-                    try
-                    {
-                        bool shutdownResult = LogitechGSDK.LogiSteeringShutdown();
-                        Debug.Log("SteeringShutdown:" + shutdownResult);
-                    }
-                    catch (System.Exception e)
-                    {
-                        Debug.LogError($"[LogitechSteeringWheel] Shutdown error: {e.Message}");
-                    }
-                    finally
-                    {
-                        sdkInitialized = false;
-                        globalSDKActive = false;
-                        ownedSDKInitialization = false;
-                    }
-                }
-            }
-        }
-
-        void OnDestroy()
-        {
-            Debug.Log($"[LogitechSteeringWheel] OnDestroy - Instance: {GetInstanceID()}");
-            SafeShutdown();
+            Debug.Log("SteeringInit:" + LogitechGSDK.LogiSteeringInitialize(false));
         }
 
         void OnApplicationQuit()
         {
-            StopAllForces();
-            SafeShutdown();
-        }
-
-        void OnApplicationFocus(bool hasFocus)
-        {
-            // Handle focus loss/gain - SDK might need reinitialization
-            if (!hasFocus)
-            {
-                StopAllForces();
-            }
-        }
-
-        void OnApplicationPause(bool pauseStatus)
-        {
-            if (pauseStatus)
-            {
-                StopAllForces();
-            }
-        }
-
-        private void StopAllForces()
-        {
-            if (sdkInitialized && LogitechGSDK.LogiIsConnected(0))
-            {
-                // Stop all active forces
-                LogitechGSDK.LogiStopSpringForce(0);
-                LogitechGSDK.LogiStopConstantForce(0);
-                LogitechGSDK.LogiStopDamperForce(0);
-                LogitechGSDK.LogiStopDirtRoadEffect(0);
-                LogitechGSDK.LogiStopBumpyRoadEffect(0);
-                LogitechGSDK.LogiStopSlipperyRoadEffect(0);
-                LogitechGSDK.LogiStopSurfaceEffect(0);
-                LogitechGSDK.LogiStopCarAirborne(0);
-                LogitechGSDK.LogiStopSoftstopForce(0);
-
-                // Clear the active force array
-                for (int i = 0; i < activeForceAndEffect.Length; i++)
-                {
-                    activeForceAndEffect[i] = "";
-                }
-            }
+            Debug.Log("SteeringShutdown:" + LogitechGSDK.LogiSteeringShutdown());
         }
 
         void OnGUI()
@@ -285,19 +53,13 @@ namespace Logitech
             GUI.Label(new Rect(10, 400, 800, 400), forcesLabel);
         }
 
-        // Update is called once per frame  
+        // Update is called once per frame
         void Update()
         {
-            // ENHANCED: Better SDK state checking
-            if (!sdkInitialized)
-            {
-                actualState = "SDK NOT INITIALIZED PROPERLY";
-                return;
-            }
-
             //All the test functions are called on the first device plugged in(index = 0)
             if (LogitechGSDK.LogiUpdate() && LogitechGSDK.LogiIsConnected(0))
             {
+
                 //CONTROLLER PROPERTIES
                 StringBuilder deviceName = new StringBuilder(256);
                 LogitechGSDK.LogiGetFriendlyProductName(0, deviceName, 256);
@@ -327,7 +89,6 @@ namespace Logitech
                 actualState += "z-axis rotation :" + rec.lRz + "\n";
                 actualState += "extra axes positions 1 :" + rec.rglSlider[0] + "\n";
                 actualState += "extra axes positions 2 :" + rec.rglSlider[1] + "\n";
-
                 switch (rec.rgdwPOV[0])
                 {
                     case (0): actualState += "POV : UP\n"; break;
@@ -342,6 +103,7 @@ namespace Logitech
                 }
 
                 //Button status :
+
                 buttonStatus = "Button pressed : \n\n";
                 for (int i = 0; i < 128; i++)
                 {
@@ -349,7 +111,36 @@ namespace Logitech
                     {
                         buttonStatus += "Button " + i + " pressed\n";
                     }
+
                 }
+
+                /* THIS AXIS ARE NEVER REPORTED BY LOGITECH CONTROLLERS 
+                 * 
+                 * actualState += "x-axis velocity :" + rec.lVX + "\n";
+                 * actualState += "y-axis velocity :" + rec.lVY + "\n";
+                 * actualState += "z-axis velocity :" + rec.lVZ + "\n";
+                 * actualState += "x-axis angular velocity :" + rec.lVRx + "\n";
+                 * actualState += "y-axis angular velocity :" + rec.lVRy + "\n";
+                 * actualState += "z-axis angular velocity :" + rec.lVRz + "\n";
+                 * actualState += "extra axes velocities 1 :" + rec.rglVSlider[0] + "\n";
+                 * actualState += "extra axes velocities 2 :" + rec.rglVSlider[1] + "\n";
+                 * actualState += "x-axis acceleration :" + rec.lAX + "\n";
+                 * actualState += "y-axis acceleration :" + rec.lAY + "\n";
+                 * actualState += "z-axis acceleration :" + rec.lAZ + "\n";
+                 * actualState += "x-axis angular acceleration :" + rec.lARx + "\n";
+                 * actualState += "y-axis angular acceleration :" + rec.lARy + "\n";
+                 * actualState += "z-axis angular acceleration :" + rec.lARz + "\n";
+                 * actualState += "extra axes accelerations 1 :" + rec.rglASlider[0] + "\n";
+                 * actualState += "extra axes accelerations 2 :" + rec.rglASlider[1] + "\n";
+                 * actualState += "x-axis force :" + rec.lFX + "\n";
+                 * actualState += "y-axis force :" + rec.lFY + "\n";
+                 * actualState += "z-axis force :" + rec.lFZ + "\n";
+                 * actualState += "x-axis torque :" + rec.lFRx + "\n";
+                 * actualState += "y-axis torque :" + rec.lFRy + "\n";
+                 * actualState += "z-axis torque :" + rec.lFRz + "\n";
+                 * actualState += "extra axes forces 1 :" + rec.rglFSlider[0] + "\n";
+                 * actualState += "extra axes forces 2 :" + rec.rglFSlider[1] + "\n";
+                 */
 
                 int shifterTipe = LogitechGSDK.LogiGetShifterMode(0);
                 string shifterString = "";
@@ -358,7 +149,10 @@ namespace Logitech
                 else shifterString = "Unknown";
                 actualState += "\nSHIFTER MODE:" + shifterString;
 
-                // FORCES AND EFFECTS
+
+
+
+                // FORCES AND EFFECTS 
                 activeForces = "Active forces and effects :\n";
 
                 //Spring Force -> S
@@ -407,7 +201,7 @@ namespace Logitech
                 }
 
                 //Side Collision Force -> left or right arrow
-                if (Input.GetKeyUp(KeyCode.LeftArrow) || Input.GetKeyUp(KeyCode.RightArrow))
+                if (Input.GetKeyUp(KeyCode.LeftArrow) || Input.GetKey(KeyCode.RightArrow))
                 {
                     LogitechGSDK.LogiPlaySideCollisionForce(0, 60);
                 }
@@ -431,6 +225,7 @@ namespace Logitech
                         LogitechGSDK.LogiPlayDirtRoadEffect(0, 50);
                         activeForceAndEffect[3] = "Dirt Road Effect\n ";
                     }
+
                 }
 
                 //Bumpy Road Effect-> B
@@ -446,6 +241,7 @@ namespace Logitech
                         LogitechGSDK.LogiPlayBumpyRoadEffect(0, 50);
                         activeForceAndEffect[4] = "Bumpy Road Effect\n";
                     }
+
                 }
 
                 //Slippery Road Effect-> L
@@ -522,6 +318,7 @@ namespace Logitech
                     properties.defaultSpringEnabled = true;
                     properties.defaultSpringGain = 80;
                     LogitechGSDK.LogiSetPreferredControllerProperties(properties);
+
                 }
 
                 //Play leds -> P
@@ -534,6 +331,7 @@ namespace Logitech
                 {
                     activeForces += activeForceAndEffect[i];
                 }
+
             }
             else if (!LogitechGSDK.LogiIsConnected(0))
             {
@@ -543,25 +341,6 @@ namespace Logitech
             {
                 actualState = "THIS WINDOW NEEDS TO BE IN FOREGROUND IN ORDER FOR THE SDK TO WORK PROPERLY";
             }
-        }
-
-        // ENHANCED: Public properties for debugging
-        public bool IsInitialized => sdkInitialized;
-        public bool IsUsingExistingSDK => usingExistingSDK;
-        public bool OwnedSDKInitialization => ownedSDKInitialization;
-        public int ActiveInstances => activeInstances;
-
-        // Context menu methods for debugging
-        [ContextMenu("Check Static Variables")]
-        public void CheckStaticVariables()
-        {
-            Debug.Log($"[LogitechSteeringWheel] Static Variables Status:");
-            Debug.Log($"[LogitechSteeringWheel] - activeInstances: {activeInstances}");
-            Debug.Log($"[LogitechSteeringWheel] - globalSDKActive: {globalSDKActive}");
-            Debug.Log($"[LogitechSteeringWheel] - staticVariablesReset: {staticVariablesReset}");
-            Debug.Log($"[LogitechSteeringWheel] - sdkInitialized: {sdkInitialized}");
-            Debug.Log($"[LogitechSteeringWheel] - usingExistingSDK: {usingExistingSDK}");
-            Debug.Log($"[LogitechSteeringWheel] - ownedSDKInitialization: {ownedSDKInitialization}");
         }
     }
 }

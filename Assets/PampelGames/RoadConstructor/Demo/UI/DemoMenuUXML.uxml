@@ -1,0 +1,37 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" editor-extension-mode="False">
+    <Style src="project://database/Assets/PampelGames/RoadConstructor/Demo/UI/DemoMenuUSS.uss?fileID=7433441132597879392&amp;guid=ffd4c592f956fef45a07a0f0441bba6b&amp;type=3#DemoMenuUSS" />
+    <ui:VisualElement name="Menu" style="flex-shrink: 0; flex-grow: 1; justify-content: space-between; align-items: stretch; display: flex;">
+        <ui:VisualElement name="InfoLabelsTop" style="flex-direction: row; justify-content: space-between;">
+            <ui:Label tabindex="-1" text="Construction Data" parse-escape-sequences="true" display-tooltip-when-elided="true" name="constructionData" class="infoLabel" />
+            <ui:Label tabindex="-1" text="Construction Fails" parse-escape-sequences="true" display-tooltip-when-elided="true" name="constructionFails" class="infoLabel" style="border-left-color: rgb(130, 0, 0); border-right-color: rgb(130, 0, 0); border-top-color: rgb(130, 0, 0); border-bottom-color: rgb(130, 0, 0);" />
+            <ui:VisualElement name="InfoLabelsBottom" style="flex-direction: row; justify-content: space-between;">
+                <ui:Label tabindex="-1" text="Building Parameter" parse-escape-sequences="true" display-tooltip-when-elided="true" name="buildingParameter" class="infoLabel" />
+            </ui:VisualElement>
+        </ui:VisualElement>
+        <ui:VisualElement name="UserPanel" style="background-color: rgba(36, 44, 88, 0.59); flex-direction: column;">
+            <ui:VisualElement name="InfoMenu" class="menuPanel">
+                <ui:Label tabindex="-1" text="Select an Intersection" parse-escape-sequences="true" display-tooltip-when-elided="true" name="moveInfoLabel" style="color: rgb(255, 255, 255); -unity-font-style: bold; -unity-text-align: middle-center; font-size: 21px;" />
+            </ui:VisualElement>
+            <ui:VisualElement name="RoadMenu" class="menuPanel">
+                <ui:Button text="Road&#10;Dummy" parse-escape-sequences="true" display-tooltip-when-elided="true" name="roadDummy" class="button" />
+            </ui:VisualElement>
+            <ui:VisualElement name="Buttons" class="menuPanel">
+                <ui:VisualElement name="ButtonsLeft" style="flex-grow: 1; flex-direction: row; align-self: center;">
+                    <ui:Button text="Type" parse-escape-sequences="true" display-tooltip-when-elided="true" name="builderRoadTypeButton" class="button" style="font-size: 20px;" />
+                    <ui:Button text="Dummy" parse-escape-sequences="true" display-tooltip-when-elided="true" name="dummy" class="button" style="font-size: 20px; opacity: 0;" />
+                </ui:VisualElement>
+                <ui:VisualElement name="OpenRoadMenuButtons" style="flex-grow: 1; flex-direction: row; justify-content: center; align-self: center;">
+                    <ui:Button text="Rural" parse-escape-sequences="true" display-tooltip-when-elided="true" name="openRoadMenu_rural" class="button" />
+                    <ui:Button text="Local" parse-escape-sequences="true" display-tooltip-when-elided="true" name="openRoadMenu_local" class="button" />
+                    <ui:Button text="Highway" parse-escape-sequences="true" display-tooltip-when-elided="true" name="openRoadMenu_highway" class="button" />
+                    <ui:Button text="One-Way" parse-escape-sequences="true" display-tooltip-when-elided="true" name="openRoadMenu_oneway" class="button" />
+                </ui:VisualElement>
+                <ui:VisualElement name="ButtonsRight" style="flex-grow: 1; flex-direction: row-reverse; align-self: center;">
+                    <ui:Button text="Undo" parse-escape-sequences="true" display-tooltip-when-elided="true" name="undo" class="button" style="background-color: rgb(61, 88, 45);" />
+                    <ui:Button text="Demolish" parse-escape-sequences="true" display-tooltip-when-elided="true" name="demolish" class="button" style="background-color: rgb(165, 58, 58);" />
+                    <ui:Button text="Move" parse-escape-sequences="true" display-tooltip-when-elided="true" name="move" class="button" style="background-color: rgb(126, 166, 226);" />
+                </ui:VisualElement>
+            </ui:VisualElement>
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>
