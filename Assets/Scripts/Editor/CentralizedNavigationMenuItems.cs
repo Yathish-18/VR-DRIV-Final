@@ -1,24 +1,31 @@
 #if UNITY_EDITOR
+
 using UnityEngine;
 using UnityEditor;
 
 // Menu items for easy access
-public class CentralizedNavigationMenuItems
+public static class CentralizedNavigationMenuItems
 {
     [MenuItem("Navigation/Centralized/Create Navigation System")]
-    static void CreateNavigationSystem()
+    private static void CreateNavigationSystem()
     {
         GameObject navSysObj = new GameObject("CentralizedNavigationSystem");
-        CentralizedNavigationSystem navSystem = navSysObj.AddComponent<CentralizedNavigationSystem>();
-
+        CentralizedNavigationSystem navSystem =
+            navSysObj.AddComponent<CentralizedNavigationSystem>();
         Selection.activeGameObject = navSysObj;
         EditorGUIUtility.PingObject(navSysObj);
     }
 
     [MenuItem("Navigation/Centralized/Create Nav Node")]
-    static void CreateNavNode()
+    private static void CreateNavNode()
     {
-        CentralizedNavigationSystem navSystem = Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+#if UNITY_2023_1_OR_NEWER
+        CentralizedNavigationSystem navSystem =
+            Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+#else
+        CentralizedNavigationSystem navSystem =
+            Object.FindObjectOfType<CentralizedNavigationSystem>();
+#endif
 
         Vector3 position = Vector3.zero;
         if (SceneView.lastActiveSceneView != null)
@@ -46,31 +53,41 @@ public class CentralizedNavigationMenuItems
     }
 
     [MenuItem("Navigation/Centralized/Create Test Car")]
-    static void CreateTestCar()
+    private static void CreateTestCar()
     {
         GameObject carObj = GameObject.CreatePrimitive(PrimitiveType.Cube);
         carObj.name = "CentralizedTestCar";
         carObj.transform.localScale = new Vector3(2f, 1f, 3f); // Make it look more car-like
-        carObj.GetComponent<Renderer>().material.color = Color.blue;
 
-        CentralizedCarController carController = carObj.AddComponent<CentralizedCarController>();
+        Renderer carRenderer = carObj.GetComponent<Renderer>();
+        if (carRenderer != null && carRenderer.sharedMaterial != null)
+        {
+            carRenderer.sharedMaterial.color = Color.blue;
+        }
 
-        // Create target
-        GameObject targetObj = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        targetObj.name = "CarTarget";
+        CentralizedCarController carController =
+            carObj.AddComponent<CentralizedCarController>();
+
+        // Create target as a NavNode instead of just a sphere
+        GameObject targetObj = new GameObject("CarTargetNode");
+        NavNode targetNavNode = targetObj.AddComponent<NavNode>();
         targetObj.transform.position = Vector3.forward * 10f;
-        targetObj.GetComponent<Renderer>().material.color = Color.green;
 
         // Link them
-        carController.target = targetObj.transform;
+        carController.targetNode = targetNavNode;
 
         // Find navigation system
-        CentralizedNavigationSystem navSystem = Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+#if UNITY_2023_1_OR_NEWER
+        CentralizedNavigationSystem navSystem =
+            Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+#else
+        CentralizedNavigationSystem navSystem =
+            Object.FindObjectOfType<CentralizedNavigationSystem>();
+#endif
+
         if (navSystem != null)
         {
             carController.navSystem = navSystem;
-            // Force setup the line renderer
-            navSystem.TestLineRendererVisibility();
         }
         else
         {
@@ -82,11 +99,12 @@ public class CentralizedNavigationMenuItems
     }
 
     [MenuItem("Navigation/Centralized/Setup Demo Scene")]
-    static void SetupDemoScene()
+    private static void SetupDemoScene()
     {
         // Create navigation system
         GameObject navSysObj = new GameObject("CentralizedNavigationSystem");
-        CentralizedNavigationSystem navSystem = navSysObj.AddComponent<CentralizedNavigationSystem>();
+        CentralizedNavigationSystem navSystem =
+            navSysObj.AddComponent<CentralizedNavigationSystem>();
 
         // Create a grid of nodes using the centralized system
         int gridSize = 5;
@@ -110,36 +128,47 @@ public class CentralizedNavigationMenuItems
         carObj.name = "CentralizedTestCar";
         carObj.transform.position = new Vector3(0, 0.5f, 0);
         carObj.transform.localScale = new Vector3(2f, 1f, 3f);
-        carObj.GetComponent<Renderer>().material.color = Color.blue;
 
-        CentralizedCarController carController = carObj.AddComponent<CentralizedCarController>();
+        Renderer carRenderer = carObj.GetComponent<Renderer>();
+        if (carRenderer != null && carRenderer.sharedMaterial != null)
+        {
+            carRenderer.sharedMaterial.color = Color.blue;
+        }
 
-        // Create target at far corner
-        GameObject targetObj = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        targetObj.name = "CarTarget";
-        targetObj.transform.position = new Vector3((gridSize - 1) * spacing, 0.5f, (gridSize - 1) * spacing);
-        targetObj.GetComponent<Renderer>().material.color = Color.green;
+        CentralizedCarController carController =
+            carObj.AddComponent<CentralizedCarController>();
+
+        // Create target at far corner AS A NAVNODE
+        GameObject targetObj = new GameObject("CarTargetNode");
+        NavNode targetNavNode = targetObj.AddComponent<NavNode>();
+        targetObj.transform.position =
+            new Vector3((gridSize - 1) * spacing, 0.5f, (gridSize - 1) * spacing);
 
         // Link them
-        carController.target = targetObj.transform;
+        carController.targetNode = targetNavNode;
         carController.navSystem = navSystem;
         carController.autoFindPath = true;
 
-        // Force LineRenderer setup
-        EditorApplication.delayCall += () => {
-            navSystem.TestLineRendererVisibility();
-        };
-
-        Debug.Log($"Demo scene created with {gridSize * gridSize} nodes in a {gridSize}x{gridSize} grid");
-        Debug.Log("Press Play to see the car automatically pathfind to the target, or press Space in Play mode to recalculate path");
+        Debug.Log(
+            $"Demo scene created with {gridSize * gridSize} nodes in a {gridSize}x{gridSize} grid");
+        Debug.Log("Press Play to see the car automatically pathfind to the target, " +
+                  "or press Space in Play mode to recalculate path");
 
         Selection.activeGameObject = navSysObj;
+        EditorGUIUtility.PingObject(navSysObj);
     }
 
     [MenuItem("Navigation/Centralized/Organize All Nodes")]
-    static void OrganizeAllNodes()
+    private static void OrganizeAllNodes()
     {
-        CentralizedNavigationSystem navSystem = Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+#if UNITY_2023_1_OR_NEWER
+        CentralizedNavigationSystem navSystem =
+            Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+#else
+        CentralizedNavigationSystem navSystem =
+            Object.FindObjectOfType<CentralizedNavigationSystem>();
+#endif
+
         if (navSystem != null)
         {
             navSystem.CollectAllNodes();
@@ -153,9 +182,16 @@ public class CentralizedNavigationMenuItems
     }
 
     [MenuItem("Navigation/Centralized/Test Line Renderer")]
-    static void TestLineRenderer()
+    private static void TestLineRenderer()
     {
-        CentralizedNavigationSystem navSystem = Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+#if UNITY_2023_1_OR_NEWER
+        CentralizedNavigationSystem navSystem =
+            Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+#else
+        CentralizedNavigationSystem navSystem =
+            Object.FindObjectOfType<CentralizedNavigationSystem>();
+#endif
+
         if (navSystem != null)
         {
             navSystem.TestLineRendererVisibility();
@@ -168,14 +204,25 @@ public class CentralizedNavigationMenuItems
     }
 
     [MenuItem("Navigation/Centralized/Force LineRenderer Setup")]
-    static void ForceLineRendererSetup()
+    private static void ForceLineRendererSetup()
     {
-        CentralizedNavigationSystem navSystem = Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+#if UNITY_2023_1_OR_NEWER
+        CentralizedNavigationSystem navSystem =
+            Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+#else
+        CentralizedNavigationSystem navSystem =
+            Object.FindObjectOfType<CentralizedNavigationSystem>();
+#endif
+
         if (navSystem != null)
         {
             // Access the private method via reflection or make it public
-            var method = typeof(CentralizedNavigationSystem).GetMethod("ForceLineRendererSetup",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var method = typeof(CentralizedNavigationSystem).GetMethod(
+                "ForceLineRendererSetup",
+                System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.Public);
+
             if (method != null)
             {
                 method.Invoke(navSystem, null);
@@ -184,7 +231,8 @@ public class CentralizedNavigationMenuItems
             }
             else
             {
-                Debug.LogWarning("ForceLineRendererSetup method not found. Make sure the method is public or accessible.");
+                Debug.LogWarning(
+                    "ForceLineRendererSetup method not found. Make sure the method is public or accessible.");
             }
         }
         else
@@ -194,20 +242,27 @@ public class CentralizedNavigationMenuItems
     }
 
     [MenuItem("Navigation/Centralized/Debug Car Pathfinding")]
-    static void DebugCarPathfinding()
+    private static void DebugCarPathfinding()
     {
-        CentralizedCarController car = Object.FindFirstObjectByType<CentralizedCarController>();
+#if UNITY_2023_1_OR_NEWER
+        CentralizedCarController car =
+            Object.FindFirstObjectByType<CentralizedCarController>();
+#else
+        CentralizedCarController car =
+            Object.FindObjectOfType<CentralizedCarController>();
+#endif
+
         if (car != null)
         {
             car.showDebugLogs = true;
-            if (car.target != null)
+            if (car.targetNode != null)
             {
                 car.FindAndFollowPath();
                 Debug.Log("Triggered car pathfinding with debug logs enabled");
             }
             else
             {
-                Debug.LogWarning("Car has no target assigned");
+                Debug.LogWarning("Car has no target node assigned");
             }
         }
         else
@@ -216,4 +271,5 @@ public class CentralizedNavigationMenuItems
         }
     }
 }
+
 #endif

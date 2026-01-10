@@ -1,36 +1,124 @@
 using UnityEngine;
-using UnityEngine.InputSystem;
+using NWH.VehiclePhysics2.Input;
 
+[DisallowMultipleComponent]
 public class SteeringWheelVisualizer : MonoBehaviour
 {
     [Header("References")]
-    public Transform capsule;       // Capsule reference (upright)
-    public Transform steeringWheel; // Visual wheel that will follow the capsule's rotation
+    [Tooltip("Optional upright reference transform (e.g. driver capsule or steering column root).")]
+    [SerializeField] private Transform capsule;
 
-    [Header("Input")]
-    public InputActionAsset inputAsset;
-    public float maxSteeringAngle = 450f;
+    [Tooltip("3D steering wheel model that will visually rotate.")]
+    [SerializeField] private Transform steeringWheel;
 
-    private InputAction steerAction;
+    [Header("Input Source")]
+    [Tooltip("SteeringWheelInputProvider1 that reads Logitech G29 input.")]
+    [SerializeField] private SteeringWheelInputProvider1 inputProvider;
 
-    void Start()
+    [Header("Visualization Settings")]
+    [Tooltip("Maximum visual steering angle in degrees. Typically matches wheel rotation range (e.g. 450, 540).")]
+    [SerializeField] private float maxSteeringAngle = 450f;
+
+    [Tooltip("Local axis around which the steering wheel rotates.")]
+    [SerializeField] private Vector3 steeringLocalAxis = new Vector3(0f, 0f, -1f);
+
+    [Tooltip("Smoothing time for visual rotation. Set to 0 for instant response.")]
+    [SerializeField] private float smoothing = 0.05f;
+
+    private float _currentAngle;
+    private float _targetAngle;
+    private float _angleVelocity;
+
+    #region Unity Lifecycle
+
+    private void Reset()
     {
-        var drivingMap = inputAsset.FindActionMap("Driving");
-        steerAction = drivingMap.FindAction("Steer");
-        drivingMap.Enable();
+        if (inputProvider == null)
+        {
+            inputProvider = FindObjectOfType<SteeringWheelInputProvider1>();
+        }
+
+        if (steeringWheel == null)
+        {
+            // Try to auto-detect a child named "SteeringWheel" if not assigned
+            Transform found = transform.Find("SteeringWheel");
+            if (found != null)
+            {
+                steeringWheel = found;
+            }
+        }
     }
 
-    void Update()
+    private void Awake()
     {
-        float steerInput = steerAction.ReadValue<float>(); // -1 to 1
-        float targetAngle = steerInput * maxSteeringAngle;
-
-        // Apply rotation to capsule (around Y-axis)
-        capsule.localRotation = Quaternion.Euler(0f, targetAngle, 0f);
-
-        // Make visual wheel follow capsule's Y-rotation only
-        Vector3 visualRot = steeringWheel.localEulerAngles;
-        visualRot.y = capsule.localEulerAngles.y;
-        steeringWheel.localEulerAngles = visualRot;
+        if (inputProvider == null)
+        {
+            inputProvider = FindObjectOfType<SteeringWheelInputProvider1>();
+        }
     }
+
+    private void Update()
+    {
+        if (steeringWheel == null || inputProvider == null)
+        {
+            return;
+        }
+
+        float steeringInput = Mathf.Clamp(inputProvider.Steering(), -1f, 1f);
+        _targetAngle = steeringInput * maxSteeringAngle;
+
+        if (smoothing > 0f)
+        {
+            _currentAngle = Mathf.SmoothDamp(_currentAngle, _targetAngle, ref _angleVelocity, smoothing);
+        }
+        else
+        {
+            _currentAngle = _targetAngle;
+        }
+
+        ApplyRotation(_currentAngle);
+    }
+
+    #endregion
+
+    #region Rotation Logic
+
+    private void ApplyRotation(float angle)
+    {
+        Quaternion steeringRotation = Quaternion.AngleAxis(angle, steeringLocalAxis.normalized);
+
+        if (capsule != null)
+        {
+            capsule.localRotation = Quaternion.Euler(0f, angle, 0f);
+            steeringWheel.localRotation = capsule.localRotation * steeringRotation;
+        }
+        else
+        {
+            steeringWheel.localRotation = steeringRotation;
+        }
+    }
+
+    #endregion
+
+    #region Public API
+
+    /// <summary>
+    /// Manually sets the visual steering angle in degrees.
+    /// </summary>
+    public void SetVisualAngle(float angle)
+    {
+        _targetAngle = Mathf.Clamp(angle, -maxSteeringAngle, maxSteeringAngle);
+        _currentAngle = _targetAngle;
+        ApplyRotation(_currentAngle);
+    }
+
+    /// <summary>
+    /// Returns the current visual steering angle in degrees.
+    /// </summary>
+    public float GetCurrentVisualAngle()
+    {
+        return _currentAngle;
+    }
+
+    #endregion
 }

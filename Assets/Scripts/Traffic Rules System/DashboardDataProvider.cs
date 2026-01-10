@@ -255,29 +255,29 @@ public class DashboardDataProvider : MonoBehaviour
         float expectedTotalPenalty = score.trafficLightPenalty + score.lanePenalty + score.speedingPenalty;
         float expectedFinalScore = Mathf.Clamp(expectedPositiveScore + 50f - expectedTotalPenalty, 0f, 100f);
 
-        string debugMessage = $"\n========== DETAILED SCORING BREAKDOWN ==========\n" +
-                             $"🎯 FINAL SCORE: {score.finalScore:F2}/100 (Grade: {score.grade})\n" +
-                             $"\n📊 POSITIVE METRICS (50% Weight):\n" +
-                             $"   • Smooth Driving: {score.smoothDrivingPercentage:F1}% → {score.smoothDrivingPoints:F2} points (25% weight)\n" +
-                             $"   • Car Health: {score.carHealthPercentage:F1}% → {score.carHealthPoints:F2} points (25% weight)\n" +
-                             $"   • Total Positive: {expectedPositiveScore:F2} points\n" +
-                             $"\n🚫 PENALTY SYSTEM (Max 50 Points Deduction):\n" +
-                             $"   • Traffic Light: -{score.trafficLightPenalty:F2} points (max -20)\n" +
-                             $"   • Lane Violations: -{score.lanePenalty:F2} points (max -15)\n" +
-                             $"   • Speeding: -{score.speedingPenalty:F2} points (max -15)\n" +
-                             $"   • Total Penalties: -{expectedTotalPenalty:F2} points\n" +
-                             $"\n🧮 CALCULATION VERIFICATION:\n" +
-                             $"   • Formula: Positive({expectedPositiveScore:F2}) + Base(50) - Penalties({expectedTotalPenalty:F2})\n" +
-                             $"   • Expected: {expectedFinalScore:F2}\n" +
-                             $"   • Actual: {score.finalScore:F2}\n" +
-                             $"   • Match: {(Mathf.Abs(expectedFinalScore - score.finalScore) < 0.01f ? "✅ YES" : "❌ NO")}\n" +
-                             $"\n🔧 SYSTEM STATUS:\n" +
-                             $"   • Base Score: {score.baseScore:F1}\n" +
-                             $"   • Vehicle Speed: {(vehicleController != null ? vehicleController.Speed * 3.6f : 0):F1} km/h\n" +
-                             $"   • Session Time: {totalTime:F1}s\n" +
-                             $"================================================";
+        //string debugMessage = $"\n========== DETAILED SCORING BREAKDOWN ==========\n" +
+        //                     $"🎯 FINAL SCORE: {score.finalScore:F2}/100 (Grade: {score.grade})\n" +
+        //                     $"\n📊 POSITIVE METRICS (50% Weight):\n" +
+        //                     $"   • Smooth Driving: {score.smoothDrivingPercentage:F1}% → {score.smoothDrivingPoints:F2} points (25% weight)\n" +
+        //                     $"   • Car Health: {score.carHealthPercentage:F1}% → {score.carHealthPoints:F2} points (25% weight)\n" +
+        //                     $"   • Total Positive: {expectedPositiveScore:F2} points\n" +
+        //                     $"\n🚫 PENALTY SYSTEM (Max 50 Points Deduction):\n" +
+        //                     $"   • Traffic Light: -{score.trafficLightPenalty:F2} points (max -20)\n" +
+        //                     $"   • Lane Violations: -{score.lanePenalty:F2} points (max -15)\n" +
+        //                     $"   • Speeding: -{score.speedingPenalty:F2} points (max -15)\n" +
+        //                     $"   • Total Penalties: -{expectedTotalPenalty:F2} points\n" +
+        //                     $"\n🧮 CALCULATION VERIFICATION:\n" +
+        //                     $"   • Formula: Positive({expectedPositiveScore:F2}) + Base(50) - Penalties({expectedTotalPenalty:F2})\n" +
+        //                     $"   • Expected: {expectedFinalScore:F2}\n" +
+        //                     $"   • Actual: {score.finalScore:F2}\n" +
+        //                     $"   • Match: {(Mathf.Abs(expectedFinalScore - score.finalScore) < 0.01f ? "✅ YES" : "❌ NO")}\n" +
+        //                     $"\n🔧 SYSTEM STATUS:\n" +
+        //                     $"   • Base Score: {score.baseScore:F1}\n" +
+        //                     $"   • Vehicle Speed: {(vehicleController != null ? vehicleController.Speed * 3.6f : 0):F1} km/h\n" +
+        //                     $"   • Session Time: {totalTime:F1}s\n" +
+        //                     $"================================================";
 
-        Debug.Log(debugMessage);
+        //Debug.Log(debugMessage);
     }
 
     // NEW: Log initial state to identify startup issues

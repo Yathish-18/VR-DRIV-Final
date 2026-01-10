@@ -1,923 +1,847 @@
-﻿using System.Collections.Generic;
-using UnityEngine;
+﻿using UnityEngine;
+using System.Collections.Generic;
 using System.Linq;
+using System;
+using System.Collections;
+#if UNITY_EDITOR
+using UnityEditor;
+[ExecuteInEditMode]
+#endif
 
 public class CentralizedNavigationSystem : MonoBehaviour
 {
     [Header("Graph Data")]
     public List<NavNode> nodes = new List<NavNode>();
-    public List<GraphConnection> connections = new List<GraphConnection>();
+    public List<ConnectionDefinition> connectionDefinitions = new List<ConnectionDefinition>();
 
-    [Header("Node Management")]
-    public Transform nodesParent; // Container for all nodes
-    public string nodeNamePrefix = "NavNode_";
-    [SerializeField] private bool autoCollectNodes = true; // Auto-collect nodes on start
+    [HideInInspector] public Dictionary<int, NavNode> nodeMap = new Dictionary<int, NavNode>();
+    public GameObject nodesParent;
 
-    [Header("Pathfinding Settings")]
-    public float maxConnectionDistance = 10f;
-    public LayerMask obstacleLayer = 1;
-    public bool useLineOfSightCheck = true;
-
-    [Header("Visualization")]
-    public bool showConnections = true;
-    public bool showPathInEditor = true;
-    public Color connectionColor = Color.green;
-    public Color pathColor = Color.red;
-    public float pathWidth = 0.5f;
-    public Material pathMaterial;
-
-    [Header("ROAD DETECTION-BASED PATH VISUALIZATION")]
-    [Tooltip("Layer mask for road surfaces that the path should stick to")]
-    public LayerMask roadLayerMask = 1; // Set this to your road layers
-    [Tooltip("Maximum distance to raycast downward to find road")]
-    public float roadRaycastDistance = 50f;
-    [Tooltip("How high above nodes to start raycast (helps with elevated nodes)")]
-    public float roadRaycastUpOffset = 20f;
-    [Tooltip("Height offset above road surface for path visualization")]
-    public float pathHeightOffset = 0.5f;
-
-    [Header("GAME-STYLE PATH VISUALIZATION")]
-    [Tooltip("Use LineRenderer for game-style path with arrows")]
-    public bool useLineRendererPath = true;
-    [Tooltip("Show directional arrows along the path")]
-    public bool showDirectionalArrows = true;
-    [Tooltip("Distance between arrow indicators")]
-    public float arrowSpacing = 3f;
-    [Tooltip("Size of directional arrows")]
-    public float arrowSize = 1f;
-    [Tooltip("Arrow prefab (optional - will create default if not set)")]
-    public GameObject arrowPrefab;
-
-    [Header("Runtime Path Rendering")]
+    [Header("Path Visualization")]
     public LineRenderer pathLineRenderer;
+    public bool showPathsInEditor = true;
+    [Tooltip("Editor-only: show ALL connections")]
+    public bool visualizeAllConnectionsEditor = false;
 
-    // Arrow system
-    private List<GameObject> pathArrows = new List<GameObject>();
-    private GameObject arrowsParent;
+    [Header("Auto Connect")]
+    public float autoConnectMaxDistance = 20f;
 
-    // Internal data structures for fast pathfinding
-    private Dictionary<int, List<int>> adjacencyList = new Dictionary<int, List<int>>();
-    private Dictionary<int, Dictionary<int, float>> edgeWeights = new Dictionary<int, Dictionary<int, float>>();
-    public Dictionary<int, NavNode> nodeMap = new Dictionary<int, NavNode>();
-    private List<int> currentPathIDs = new List<int>();
+    [Header("Node Creation")]
+    public float newNodeDistance = 15f;
 
-    // Pathfinding data
-    private Dictionary<int, float> gCosts = new Dictionary<int, float>();
-    private Dictionary<int, float> hCosts = new Dictionary<int, float>();
-    private Dictionary<int, int> parents = new Dictionary<int, int>();
+    [Header("=== NPC SPAWN SETTINGS ===")]
+    [SerializeField] private List<GameObject> vehiclePrefabs = new List<GameObject>();
+    [SerializeField][Range(5, 100)] private int totalNPCs = 20;
 
-    void Awake()
+    [Header("=== SPAWN SETTINGS ===")]
+    [SerializeField] private bool autoCollectNodesOnStart = true;
+    [SerializeField] private bool autoFixCollisions = true;
+    [SerializeField] private float spawnStaggerDelay = 0.2f;
+    [SerializeField] private float minNodeDistance = 5f; // Simple distance between cars
+
+    [Header("=== DEBUG ===")]
+    [SerializeField] private bool showSpawnZones = true;
+    [SerializeField] private bool logSpawnDetails = true;
+
+    private List<NPCVehicleInstance> activeNPCs = new List<NPCVehicleInstance>();
+    private HashSet<int> usedNodes = new HashSet<int>();
+
+    #region Initialization
+
+    private void Awake()
     {
-        SetupNodeHierarchy();
-        SetupArrowSystem();
+        StartCoroutine(InitializeSystem());
     }
 
-    void Start()
+    private IEnumerator InitializeSystem()
     {
-        // Force collect all nodes in scene
-        if (autoCollectNodes)
+        yield return new WaitForSeconds(1f);
+
+        if (vehiclePrefabs.Count == 0)
         {
-            CollectAllNodes();
+            Debug.LogError("[NPCManager] ❌ No vehicle prefabs assigned!");
+            yield break;
         }
 
+        // Setup nav graph
         RefreshGraph();
 
-        // Setup LineRenderer for game-style visualization
-        if (useLineRendererPath)
+        if (nodes.Count == 0 && autoCollectNodesOnStart)
         {
-            SetupLineRenderer();
-            ForceLineRendererSetup();
+            Debug.Log("[NPCManager] 🔍 Collecting nodes...");
+            CollectAllNodes();
+            yield return new WaitForSeconds(0.5f);
+            RefreshGraph();
+        }
+
+        if (nodeMap.Count == 0)
+        {
+            Debug.LogError("[NPCManager] ❌ No nodes found! Right-click CentralizedNavigationSystem → Collect All Nodes");
+            yield break;
+        }
+
+        Debug.Log($"[NPCManager] 🚗 Found {nodeMap.Count} nodes, spawning {totalNPCs} NPCs...");
+
+        // RANDOM SPAWN WITH RANDOM DESTINATIONS
+        yield return StartCoroutine(SpawnAllNPCs());
+
+        Debug.Log($"✅ [NPCManager] Spawned {activeNPCs.Count}/{totalNPCs} NPCs successfully!");
+    }
+
+    #endregion
+
+    private void Start()
+    {
+        RefreshGraph();
+        SetupLineRenderer();
+    }
+
+#if UNITY_EDITOR
+    private void OnValidate()
+    {
+        if (!Application.isPlaying)
+        {
+            RefreshGraph();
+            UpdateEditorConnectionsVisualization();
         }
     }
 
-    void SetupNodeHierarchy()
+    private void Update()
     {
-        // Create nodes parent if not specified
-        if (nodesParent == null)
+        if (!Application.isPlaying && visualizeAllConnectionsEditor)
+            DrawAllConnectionsIntoLineRenderer();
+    }
+#endif
+
+    // 🔥 SAFE PATHFINDING METHODS
+    public int GetClosestNode(Vector3 worldPosition)
+    {
+        if (nodeMap.Count == 0) return 0;
+
+        float closestDist = float.MaxValue;
+        int closestID = 0;
+
+        foreach (var kvp in nodeMap)
         {
-            GameObject nodesContainer = new GameObject("Nodes");
-            nodesContainer.transform.SetParent(transform);
-            nodesParent = nodesContainer.transform;
+            float dist = Vector3.Distance(worldPosition, kvp.Value.worldPosition);
+            if (dist < closestDist)
+            {
+                closestDist = dist;
+                closestID = kvp.Key;
+            }
         }
+        return closestID;
     }
 
-    void SetupArrowSystem()
+    // 🎲 GET RANDOM NODE
+    public int GetRandomNode()
     {
-        if (arrowsParent == null)
-        {
-            arrowsParent = new GameObject("PathArrows");
-            arrowsParent.transform.SetParent(transform);
-        }
+        if (nodeMap.Count == 0) return -1;
+
+        List<int> nodeIDs = nodeMap.Keys.ToList();
+        return nodeIDs[UnityEngine.Random.Range(0, nodeIDs.Count)];
     }
 
-    public void CollectAllNodes()
+    // 🎲 GET RANDOM NODE (EXCLUDING SPECIFIC NODES)
+    public int GetRandomNode(HashSet<int> excludeNodes)
     {
-        // Find ALL NavNode objects in the scene
-        NavNode[] allNodes = Object.FindObjectsByType<NavNode>(FindObjectsSortMode.None);
-        foreach (NavNode node in allNodes)
+        if (nodeMap.Count == 0) return -1;
+
+        List<int> availableNodes = nodeMap.Keys.Where(id => !excludeNodes.Contains(id)).ToList();
+
+        if (availableNodes.Count == 0)
+            return GetRandomNode(); // Fallback to any node
+
+        return availableNodes[UnityEngine.Random.Range(0, availableNodes.Count)];
+    }
+
+    [ContextMenu("Test LineRenderer Visibility")]
+    public void TestLineRendererVisibility()
+    {
+        SetupLineRenderer();
+        if (nodes.Count > 1)
+            VisualizePath(new List<int> { 0, 1 });
+    }
+
+    [ContextMenu("➡️ Create Node Forward (Last)")]
+    public void CreateNodeForward()
+    {
+        if (nodes.Count == 0)
         {
-            RegisterNode(node);
+            CreateNode(transform.position, -1, transform.rotation);
+            return;
         }
 
-        Debug.Log($"Collected {allNodes.Length} nodes");
+        NavNode lastNode = nodes.Last();
+        Vector3 forwardPos = lastNode.transform.position + lastNode.transform.forward * newNodeDistance;
+        forwardPos.y += 0.5f;
+        int newID = nodes.Count;
+
+        NavNode newNode = CreateNode(forwardPos, newID, lastNode.transform.rotation);
+        AddConnectionDefinition(lastNode.nodeID, newID, true);
+
+        Debug.Log($"[Nav] Created node {newID} ➡️ from last");
+#if UNITY_EDITOR
+        Selection.activeGameObject = newNode.gameObject;
+#endif
     }
 
     public void RegisterNode(NavNode node)
     {
         if (node == null) return;
 
-        // Set parent reference
-        node.parentNavSystem = this;
-
-        // Add to nodes list if not already there
         if (!nodes.Contains(node))
         {
+            node.nodeID = nodes.Count;
             nodes.Add(node);
         }
 
-        // Auto-assign ID if not set
-        if (node.nodeID < 0)
-        {
-            node.nodeID = GetNextAvailableID();
-        }
-
-        // Add to node map
-        nodeMap[node.nodeID] = node;
-    }
-
-    public NavNode CreateNode(Vector3 position, int? nodeID = null)
-    {
-        // Ensure nodes parent exists
-        if (nodesParent == null)
-        {
-            SetupNodeHierarchy();
-        }
-
-        // Raycast down to find road surface position
-        Vector3 roadPos = RoadDetectionHelper.GetRoadSurfacePosition(position, roadLayerMask, roadRaycastDistance, roadRaycastUpOffset);
-
-        // Create new node GameObject
-        int id = nodeID.HasValue ? nodeID.Value : GetNextAvailableID();
-        GameObject nodeObj = new GameObject($"{nodeNamePrefix}{id}");
-
-        // Set position to road-detected position
-        nodeObj.transform.position = roadPos;
-        nodeObj.transform.SetParent(nodesParent);
-
-        // Add NavNode component
-        NavNode createdNode = nodeObj.AddComponent<NavNode>();
-        createdNode.nodeID = id;
-
-        // Register the node
-        RegisterNode(createdNode);
-
-        return createdNode;
-    }
-
-    public void UnregisterNode(NavNode node)
-    {
-        if (node == null) return;
-
-        // Remove from lists
-        nodes.Remove(node);
-        if (nodeMap.ContainsKey(node.nodeID))
-        {
-            nodeMap.Remove(node.nodeID);
-        }
-
-        // Remove connections involving this node
-        connections.RemoveAll(c => c.fromNodeID == node.nodeID || c.toNodeID == node.nodeID);
-
-        // Refresh graph
+        node.parentNavSystem = this;
         RefreshGraph();
+
+#if UNITY_EDITOR
+        UpdateEditorConnectionsVisualization();
+#endif
     }
 
-    int GetNextAvailableID()
+    public int GetDistantNode(int fromNodeID, float minDistance = 25f)
     {
-        if (nodes.Count == 0) return 0;
-        int maxID = nodes.Where(n => n != null).Select(n => n.nodeID).DefaultIfEmpty(-1).Max();
-        return maxID + 1;
+        var candidates = nodeMap.Keys
+            .Where(id => id != fromNodeID && nodeMap.ContainsKey(id))
+            .Where(id => Vector3.Distance(nodeMap[fromNodeID].worldPosition, nodeMap[id].worldPosition) >= minDistance)
+            .ToList();
+
+        return candidates.Count > 0 ? candidates[UnityEngine.Random.Range(0, candidates.Count)] : fromNodeID;
     }
 
-    [ContextMenu("Refresh Graph")]
-    public void RefreshGraph()
+    // 🔥 SAFE A* PATHFINDING - CRITICAL: THIS MUST RETURN A VALID PATH
+    public List<int> FindPath(int start, int target)
     {
-        BuildNodeMap();
-        BuildAdjacencyList();
-        Debug.Log($"Graph refreshed: {nodes.Count} nodes, {connections.Count} connections");
-    }
-
-    void BuildNodeMap()
-    {
-        nodeMap.Clear();
-        // Remove null nodes
-        nodes.RemoveAll(n => n == null);
-
-        // Build node map
-        foreach (var node in nodes)
+        // 🔥 SAFETY CHECKS FIRST
+        if (!nodeMap.ContainsKey(start) || !nodeMap.ContainsKey(target))
         {
-            if (node != null)
-            {
-                nodeMap[node.nodeID] = node;
-            }
-        }
-    }
-
-    void BuildAdjacencyList()
-    {
-        adjacencyList.Clear();
-        edgeWeights.Clear();
-
-        // Initialize adjacency lists for all nodes
-        foreach (var kvp in nodeMap)
-        {
-            adjacencyList[kvp.Key] = new List<int>();
-            edgeWeights[kvp.Key] = new Dictionary<int, float>();
+            Debug.LogWarning($"FindPath: Invalid start={start} or target={target}");
+            return new List<int>(); // Return empty list instead of null
         }
 
-        // Build connections from the connections list
-        foreach (var connection in connections)
+        if (start == target)
         {
-            if (nodeMap.ContainsKey(connection.fromNodeID) && nodeMap.ContainsKey(connection.toNodeID))
-            {
-                // Add forward connection
-                if (!adjacencyList[connection.fromNodeID].Contains(connection.toNodeID))
-                {
-                    adjacencyList[connection.fromNodeID].Add(connection.toNodeID);
-                    edgeWeights[connection.fromNodeID][connection.toNodeID] = connection.weight;
-                }
-
-                // Add reverse connection if bidirectional
-                if (connection.bidirectional && !adjacencyList[connection.toNodeID].Contains(connection.fromNodeID))
-                {
-                    adjacencyList[connection.toNodeID].Add(connection.fromNodeID);
-                    edgeWeights[connection.toNodeID][connection.fromNodeID] = connection.weight;
-                }
-            }
-        }
-    }
-
-    public void AutoConnectNodes()
-    {
-        connections.Clear();
-
-        for (int i = 0; i < nodes.Count; i++)
-        {
-            for (int j = i + 1; j < nodes.Count; j++)
-            {
-                if (nodes[i] != null && nodes[j] != null)
-                {
-                    float distance = Vector3.Distance(nodes[i].transform.position, nodes[j].transform.position);
-                    if (distance <= maxConnectionDistance)
-                    {
-                        if (!useLineOfSightCheck || HasClearLineOfSight(nodes[i].transform.position, nodes[j].transform.position))
-                        {
-                            connections.Add(new GraphConnection(nodes[i].nodeID, nodes[j].nodeID, distance, true));
-                        }
-                    }
-                }
-            }
+            Debug.LogWarning($"FindPath: Start and target are the same ({start})");
+            return new List<int> { start }; // Return single-node path
         }
 
-        RefreshGraph();
-        Debug.Log($"Auto-connected nodes: {connections.Count} connections created");
-    }
+        RefreshGraph(); // Ensure fresh data
 
-    bool HasClearLineOfSight(Vector3 start, Vector3 end)
-    {
-        Vector3 direction = (end - start);
-        return !Physics.Raycast(start, direction.normalized, direction.magnitude, obstacleLayer);
-    }
+        var cameFrom = new Dictionary<int, int>();
+        var gScore = new Dictionary<int, float> { { start, 0f } };
+        var fScore = new Dictionary<int, float> { { start, Heuristic(start, target) } };
+        var openSet = new PriorityQueue<int>();
+        var closedSet = new HashSet<int>();
 
-    public List<int> FindPath(int startNodeID, int endNodeID)
-    {
-        if (!nodeMap.ContainsKey(startNodeID) || !nodeMap.ContainsKey(endNodeID))
-        {
-            Debug.LogWarning($"Invalid node IDs: start={startNodeID}, end={endNodeID}");
-            return new List<int>();
-        }
-
-        // Reset pathfinding data
-        gCosts.Clear();
-        hCosts.Clear();
-        parents.Clear();
-
-        List<int> openSet = new List<int>();
-        HashSet<int> closedSet = new HashSet<int>();
-
-        // Initialize all nodes
-        foreach (var nodeID in nodeMap.Keys)
-        {
-            gCosts[nodeID] = float.MaxValue;
-            hCosts[nodeID] = 0f;
-            parents[nodeID] = -1;
-        }
-
-        gCosts[startNodeID] = 0f;
-        hCosts[startNodeID] = GetHeuristic(startNodeID, endNodeID);
-        openSet.Add(startNodeID);
+        openSet.Enqueue(start, fScore[start]);
 
         while (openSet.Count > 0)
         {
-            // Find node with lowest fCost
-            int currentNodeID = openSet[0];
-            float lowestFCost = gCosts[currentNodeID] + hCosts[currentNodeID];
+            int current = openSet.Dequeue();
 
-            for (int i = 1; i < openSet.Count; i++)
+            if (current == target)
             {
-                float fCost = gCosts[openSet[i]] + hCosts[openSet[i]];
-                if (fCost < lowestFCost || (fCost == lowestFCost && hCosts[openSet[i]] < hCosts[currentNodeID]))
-                {
-                    currentNodeID = openSet[i];
-                    lowestFCost = fCost;
-                }
+                return ReconstructPath(cameFrom, current);
             }
 
-            openSet.Remove(currentNodeID);
-            closedSet.Add(currentNodeID);
+            closedSet.Add(current);
 
-            // Path found
-            if (currentNodeID == endNodeID)
+            foreach (int neighbor in GetNeighbors(current))
             {
-                return RetracePath(startNodeID, endNodeID);
-            }
+                if (closedSet.Contains(neighbor))
+                    continue;
 
-            // Check neighbors
-            if (adjacencyList.ContainsKey(currentNodeID))
-            {
-                foreach (int neighborID in adjacencyList[currentNodeID])
+                float tentativeG = gScore[current] + GetEdgeWeight(current, neighbor);
+
+                if (!gScore.ContainsKey(neighbor) || tentativeG < gScore[neighbor])
                 {
-                    if (closedSet.Contains(neighborID)) continue;
+                    cameFrom[neighbor] = current;
+                    gScore[neighbor] = tentativeG;
+                    fScore[neighbor] = tentativeG + Heuristic(neighbor, target);
 
-                    float newCostToNeighbor = gCosts[currentNodeID] + edgeWeights[currentNodeID][neighborID];
-
-                    if (newCostToNeighbor < gCosts[neighborID] || !openSet.Contains(neighborID))
-                    {
-                        gCosts[neighborID] = newCostToNeighbor;
-                        hCosts[neighborID] = GetHeuristic(neighborID, endNodeID);
-                        parents[neighborID] = currentNodeID;
-
-                        if (!openSet.Contains(neighborID))
-                            openSet.Add(neighborID);
-                    }
+                    if (!openSet.Contains(neighbor))
+                        openSet.Enqueue(neighbor, fScore[neighbor]);
                 }
             }
         }
 
-        // No path found
-        return new List<int>();
+        Debug.LogWarning($"FindPath: No path found from {start} to {target}. Graph may be disconnected!");
+        return new List<int>(); // Return empty list if no path found
     }
 
-    public List<int> FindPath(Vector3 startPos, Vector3 endPos)
+    // 🔥 SAFE HEURISTIC
+    private float Heuristic(int a, int b)
     {
-        int startNodeID = GetClosestNodeID(startPos);
-        int endNodeID = GetClosestNodeID(endPos);
-
-        if (startNodeID < 0 || endNodeID < 0)
+        if (!nodeMap.ContainsKey(a) || !nodeMap.ContainsKey(b))
         {
-            Debug.LogWarning("Could not find start or end node for pathfinding");
-            return new List<int>();
+            Debug.LogWarning($"Heuristic: Missing nodes a={a}, b={b}. Using distance 999f");
+            return 999f;
         }
 
-        Debug.Log($"Pathfinding: Start pos {startPos} -> Node {startNodeID}, End pos {endPos} -> Node {endNodeID}");
-        return FindPath(startNodeID, endNodeID);
+        Vector3 pa = nodeMap[a].worldPosition;
+        Vector3 pb = nodeMap[b].worldPosition;
+        return Vector3.Distance(new Vector3(pa.x, 0, pa.z), new Vector3(pb.x, 0, pb.z));
     }
 
-    private List<int> RetracePath(int startNodeID, int endNodeID)
+    private List<int> GetNeighbors(int nodeID)
     {
-        List<int> path = new List<int>();
-        int currentNodeID = endNodeID;
+        List<int> neighbors = new List<int>();
 
-        while (currentNodeID != startNodeID && currentNodeID != -1)
+        foreach (var c in connectionDefinitions)
         {
-            path.Add(currentNodeID);
-            currentNodeID = parents.ContainsKey(currentNodeID) ? parents[currentNodeID] : -1;
+            if (c.fromNodeID == nodeID)
+            {
+                neighbors.Add(c.toNodeID);
+            }
+            else if (c.bidirectional && c.toNodeID == nodeID)
+            {
+                neighbors.Add(c.fromNodeID);
+            }
         }
 
-        if (currentNodeID == startNodeID)
-        {
-            path.Add(startNodeID);
-            path.Reverse();
-        }
+        return neighbors.Distinct().ToList();
+    }
 
+    private float GetEdgeWeight(int from, int to) => 1f;
+
+    private List<int> ReconstructPath(Dictionary<int, int> cameFrom, int current)
+    {
+        List<int> path = new List<int> { current };
+        while (cameFrom.ContainsKey(current))
+        {
+            current = cameFrom[current];
+            path.Insert(0, current);
+        }
         return path;
     }
 
-    private float GetHeuristic(int nodeID1, int nodeID2)
+#if UNITY_EDITOR
+    [ContextMenu("🎯 Create Next Node From Selected")]
+    public void CreateNextNodeFromSelected()
     {
-        if (!nodeMap.ContainsKey(nodeID1) || !nodeMap.ContainsKey(nodeID2))
-            return 0f;
-
-        return Vector3.Distance(nodeMap[nodeID1].transform.position, nodeMap[nodeID2].transform.position);
-    }
-
-    public int GetClosestNodeID(Vector3 position)
-    {
-        if (nodeMap.Count == 0) return -1;
-
-        int closestID = -1;
-        float closestDistance = float.MaxValue;
-
-        foreach (var kvp in nodeMap)
+        NavNode selected = GetSelectedNode();
+        if (selected == null)
         {
-            if (kvp.Value != null)
-            {
-                float distance = Vector3.Distance(position, kvp.Value.transform.position);
-                if (distance < closestDistance)
-                {
-                    closestID = kvp.Key;
-                    closestDistance = distance;
-                }
-            }
-        }
-
-        return closestID;
-    }
-
-    /// <summary>
-    /// Gets road-detected position for path visualization using advanced raycast
-    /// This ensures the path always follows the road surface perfectly
-    /// </summary>
-    private Vector3 GetRoadPathPosition(Vector3 nodePosition)
-    {
-        return RoadDetectionHelper.GetRoadSurfacePositionWithOffset(
-            nodePosition,
-            roadLayerMask,
-            pathHeightOffset,
-            roadRaycastDistance,
-            roadRaycastUpOffset
-        );
-    }
-
-    public void VisualizePath(List<int> pathIDs)
-    {
-        currentPathIDs = new List<int>(pathIDs);
-
-        if (useLineRendererPath)
-        {
-            VisualizeGameStylePath(pathIDs);
-        }
-        else
-        {
-            Debug.LogWarning("LineRenderer path visualization is disabled. Enable 'Use Line Renderer Path' to see the path.");
-        }
-    }
-
-    /// <summary>
-    /// GAME-STYLE PATH VISUALIZATION WITH ARROWS
-    /// Creates LineRenderer path with directional arrows like in games
-    /// </summary>
-    private void VisualizeGameStylePath(List<int> pathIDs)
-    {
-        // Clear existing arrows
-        ClearPathArrows();
-
-        // Ensure LineRenderer is set up
-        if (pathLineRenderer == null)
-        {
-            SetupLineRenderer();
-            ForceLineRendererSetup();
-        }
-
-        if (pathLineRenderer == null || pathIDs.Count < 2)
-        {
-            if (pathLineRenderer != null)
-                pathLineRenderer.positionCount = 0;
-            Debug.LogWarning("Cannot visualize path: LineRenderer is null or path too short");
+            Debug.LogWarning("[Nav] No NavNode selected!");
             return;
         }
 
-        // Create positions using advanced road raycast detection
-        List<Vector3> positions = new List<Vector3>();
-        for (int i = 0; i < pathIDs.Count; i++)
-        {
-            if (nodeMap.ContainsKey(pathIDs[i]) && nodeMap[pathIDs[i]] != null)
-            {
-                Vector3 nodePos = nodeMap[pathIDs[i]].transform.position;
-                Vector3 roadPathPos = GetRoadPathPosition(nodePos);
-                positions.Add(roadPathPos);
-            }
-        }
+        Vector3 forwardPos = selected.transform.position + selected.transform.forward * newNodeDistance;
+        forwardPos.y += 0.5f;
+        int newID = nodes.Count;
 
-        // Set positions to LineRenderer
-        pathLineRenderer.positionCount = positions.Count;
-        pathLineRenderer.SetPositions(positions.ToArray());
-        pathLineRenderer.enabled = true;
+        NavNode newNode = CreateNode(forwardPos, newID, selected.transform.rotation);
+        AddConnectionDefinition(selected.nodeID, newID, true);
 
-        // Create directional arrows along the path
-        if (showDirectionalArrows)
-        {
-            CreatePathArrows(positions);
-        }
-
-        Debug.Log($"Game-style LineRenderer path visualized with {pathIDs.Count} points using advanced road detection");
+        Debug.Log($"[Nav] Created node {newID} ➡️ from {selected.nodeID}");
+        Selection.activeGameObject = newNode.gameObject;
     }
 
-    /// <summary>
-    /// Creates directional arrows along the path
-    /// </summary>
-    private void CreatePathArrows(List<Vector3> pathPositions)
+    private NavNode GetSelectedNode()
     {
-        if (pathPositions.Count < 2) return;
-
-        float totalDistance = 0f;
-        List<float> distances = new List<float>();
-        distances.Add(0f);
-
-        // Calculate distances between points
-        for (int i = 1; i < pathPositions.Count; i++)
-        {
-            float dist = Vector3.Distance(pathPositions[i - 1], pathPositions[i]);
-            totalDistance += dist;
-            distances.Add(totalDistance);
-        }
-
-        // Place arrows at regular intervals
-        float currentDistance = 0f;
-        while (currentDistance < totalDistance)
-        {
-            // Find which segment this distance falls on
-            int segmentIndex = 0;
-            for (int i = 1; i < distances.Count; i++)
-            {
-                if (currentDistance <= distances[i])
-                {
-                    segmentIndex = i - 1;
-                    break;
-                }
-            }
-
-            if (segmentIndex < pathPositions.Count - 1)
-            {
-                // Interpolate position along the segment
-                float segmentStart = distances[segmentIndex];
-                float segmentEnd = distances[segmentIndex + 1];
-                float segmentLength = segmentEnd - segmentStart;
-
-                if (segmentLength > 0)
-                {
-                    float t = (currentDistance - segmentStart) / segmentLength;
-                    Vector3 arrowPos = Vector3.Lerp(pathPositions[segmentIndex], pathPositions[segmentIndex + 1], t);
-                    Vector3 arrowDirection = (pathPositions[segmentIndex + 1] - pathPositions[segmentIndex]).normalized;
-
-                    CreateArrow(arrowPos, arrowDirection);
-                }
-            }
-
-            currentDistance += arrowSpacing;
-        }
+        if (Selection.activeGameObject == null) return null;
+        NavNode selected = Selection.activeGameObject.GetComponent<NavNode>();
+        return selected?.parentNavSystem == this ? selected : null;
     }
 
-    /// <summary>
-    /// Creates a single directional arrow
-    /// </summary>
-    private void CreateArrow(Vector3 position, Vector3 direction)
+    [ContextMenu("1. Collect All Nodes")]
+    public void CollectAllNodes()
     {
-        GameObject arrow;
+        NavNode[] allNodes = FindObjectsOfType<NavNode>();
+        nodes.Clear();
+        int id = 0;
 
-        if (arrowPrefab != null)
+        foreach (var node in allNodes)
         {
-            arrow = Instantiate(arrowPrefab, position, Quaternion.LookRotation(direction));
+            if (node == null) continue;
+            node.parentNavSystem = this;
+            node.nodeID = id++;
+            if (nodesParent != null) node.transform.SetParent(nodesParent.transform);
+            nodes.Add(node);
         }
-        else
-        {
-            // Create default arrow using primitives
-            arrow = CreateDefaultArrow(position, direction);
-        }
-
-        arrow.transform.SetParent(arrowsParent.transform);
-        pathArrows.Add(arrow);
-    }
-
-    /// <summary>
-    /// Creates a default arrow using Unity primitives
-    /// </summary>
-    private GameObject CreateDefaultArrow(Vector3 position, Vector3 direction)
-    {
-        GameObject arrow = new GameObject("PathArrow");
-        arrow.transform.position = position;
-        arrow.transform.rotation = Quaternion.LookRotation(direction);
-
-        // Arrow body (cylinder)
-        GameObject body = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-        body.transform.SetParent(arrow.transform);
-        body.transform.localPosition = Vector3.zero;
-        body.transform.localScale = new Vector3(arrowSize * 0.2f, arrowSize * 0.5f, arrowSize * 0.2f);
-        body.transform.localRotation = Quaternion.Euler(90, 0, 0);
-
-        // Remove collider
-        DestroyImmediate(body.GetComponent<Collider>());
-
-        // Set material
-        Renderer bodyRenderer = body.GetComponent<Renderer>();
-        if (pathMaterial != null)
-        {
-            bodyRenderer.material = pathMaterial;
-        }
-        else
-        {
-            bodyRenderer.material.color = pathColor;
-        }
-
-        // Arrow head (cone)
-        GameObject head = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        head.transform.SetParent(arrow.transform);
-        head.transform.localPosition = new Vector3(0, 0, arrowSize * 0.4f);
-        head.transform.localScale = new Vector3(arrowSize * 0.4f, arrowSize * 0.3f, arrowSize * 0.6f);
-
-        // Remove collider
-        DestroyImmediate(head.GetComponent<Collider>());
-
-        // Set material
-        Renderer headRenderer = head.GetComponent<Renderer>();
-        if (pathMaterial != null)
-        {
-            headRenderer.material = pathMaterial;
-        }
-        else
-        {
-            headRenderer.material.color = pathColor;
-        }
-
-        return arrow;
-    }
-
-    /// <summary>
-    /// Clears all path arrows
-    /// </summary>
-    private void ClearPathArrows()
-    {
-        foreach (GameObject arrow in pathArrows)
-        {
-            if (arrow != null)
-            {
-                DestroyImmediate(arrow);
-            }
-        }
-        pathArrows.Clear();
-    }
-
-    public void ClearPath()
-    {
-        currentPathIDs.Clear();
-
-        // Clear LineRenderer
-        if (pathLineRenderer != null)
-        {
-            pathLineRenderer.positionCount = 0;
-            pathLineRenderer.enabled = false;
-        }
-
-        // Clear arrows
-        ClearPathArrows();
-    }
-
-    void SetupLineRenderer()
-    {
-        if (pathLineRenderer == null)
-        {
-            GameObject lineObj = new GameObject("GameStylePathRenderer");
-            lineObj.transform.SetParent(transform);
-            pathLineRenderer = lineObj.AddComponent<LineRenderer>();
-        }
-    }
-
-    // FIXED: LineRenderer alignment to prevent perpendicular orientation
-    void ForceLineRendererSetup()
-    {
-        if (pathLineRenderer == null) return;
-
-        // Try multiple shader options for compatibility
-        if (pathMaterial == null)
-        {
-            // URP-compatible shaders (in order of preference)
-            Shader lineShader = Shader.Find("Universal Render Pipeline/Unlit");
-            if (lineShader == null)
-                lineShader = Shader.Find("Universal Render Pipeline/Lit");
-            if (lineShader == null)
-                lineShader = Shader.Find("Sprites/Default");
-            if (lineShader == null)
-                lineShader = Shader.Find("Unlit/Color");
-            if (lineShader == null)
-                lineShader = Shader.Find("Legacy Shaders/Unlit/Color");
-
-            if (lineShader != null)
-            {
-                pathMaterial = new Material(lineShader);
-                pathMaterial.color = pathColor;
-
-                // URP-specific properties
-                if (pathMaterial.HasProperty("_BaseColor"))
-                    pathMaterial.SetColor("_BaseColor", pathColor);
-                if (pathMaterial.HasProperty("_Color"))
-                    pathMaterial.SetColor("_Color", pathColor);
-            }
-            else
-            {
-                Debug.LogError("No suitable shader found for LineRenderer! Path may not be visible.");
-            }
-        }
-
-        // FIXED: Configure LineRenderer properties to align properly with roads
-        pathLineRenderer.material = pathMaterial;
-        pathLineRenderer.startColor = pathColor;
-        pathLineRenderer.endColor = pathColor;
-        pathLineRenderer.startWidth = pathWidth;
-        pathLineRenderer.endWidth = pathWidth;
-        pathLineRenderer.positionCount = 0;
-        pathLineRenderer.useWorldSpace = true;
-
-        // CRITICAL FIX: Use View alignment to make line face camera, not perpendicular to road
-        pathLineRenderer.alignment = LineAlignment.View;
-
-        pathLineRenderer.textureMode = LineTextureMode.Tile;
-        pathLineRenderer.widthMultiplier = 1f;
-        pathLineRenderer.numCornerVertices = 8;
-        pathLineRenderer.numCapVertices = 4;
-
-        // Smooth width curve for better appearance
-        AnimationCurve widthCurve = new AnimationCurve();
-        widthCurve.AddKey(0f, 1f);
-        widthCurve.AddKey(1f, 1f);
-        for (int i = 0; i < widthCurve.keys.Length; i++)
-        {
-            widthCurve.keys[i].inTangent = 0f;
-            widthCurve.keys[i].outTangent = 0f;
-        }
-        pathLineRenderer.widthCurve = widthCurve;
-
-        pathLineRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-        pathLineRenderer.receiveShadows = false;
-        pathLineRenderer.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;
-        pathLineRenderer.allowOcclusionWhenDynamic = false;
-        pathLineRenderer.enabled = true;
-        pathLineRenderer.gameObject.SetActive(true);
-
-        Debug.Log($"Game-style LineRenderer setup complete with FIXED alignment. Material: {(pathMaterial != null ? pathMaterial.shader.name : "NULL")}, Width: {pathWidth}");
-    }
-
-    public void AddConnection(int fromNodeID, int toNodeID, bool bidirectional = true)
-    {
-        if (!nodeMap.ContainsKey(fromNodeID) || !nodeMap.ContainsKey(toNodeID))
-            return;
-
-        // Check if connection already exists
-        bool connectionExists = connections.Any(c =>
-            (c.fromNodeID == fromNodeID && c.toNodeID == toNodeID) ||
-            (c.bidirectional && c.fromNodeID == toNodeID && c.toNodeID == fromNodeID));
-
-        if (!connectionExists)
-        {
-            float weight = Vector3.Distance(nodeMap[fromNodeID].transform.position, nodeMap[toNodeID].transform.position);
-            connections.Add(new GraphConnection(fromNodeID, toNodeID, weight, bidirectional));
-            RefreshGraph();
-        }
-    }
-
-    public void RemoveConnection(int fromNodeID, int toNodeID)
-    {
-        connections.RemoveAll(c =>
-            (c.fromNodeID == fromNodeID && c.toNodeID == toNodeID) ||
-            (c.bidirectional && c.fromNodeID == toNodeID && c.toNodeID == fromNodeID));
 
         RefreshGraph();
+        UpdateEditorConnectionsVisualization();
     }
 
-    // Test methods
-    [ContextMenu("Test Game-Style Path Visualization")]
-    public void TestGameStylePathVisualization()
+    [ContextMenu("2. Auto Connect Nodes")]
+    public void AutoConnectNodes()
     {
-        if (nodes.Count < 2)
+        connectionDefinitions.Clear();
+        for (int i = 0; i < nodes.Count; i++)
         {
-            Debug.LogWarning("Need at least 2 nodes to test path visualization");
-            return;
+            var ni = nodes[i];
+            if (ni == null) continue;
+
+            for (int j = i + 1; j < nodes.Count; j++)
+            {
+                var nj = nodes[j];
+                if (nj == null) continue;
+
+                if (Vector3.Distance(ni.transform.position, nj.transform.position) <= autoConnectMaxDistance)
+                    AddConnection(ni.nodeID, nj.nodeID, true);
+            }
+        }
+        RefreshGraph();
+        UpdateEditorConnectionsVisualization();
+    }
+
+    [ContextMenu("3. Clear All Connections")]
+    public void ClearAllConnections()
+    {
+        connectionDefinitions.Clear();
+        RefreshGraph();
+        UpdateEditorConnectionsVisualization();
+    }
+
+    [ContextMenu("4. Setup Demo")]
+    public void SetupDemo()
+    {
+        ClearAllConnections();
+        nodes.Clear();
+
+        if (nodesParent == null)
+        {
+            nodesParent = new GameObject("NavigationNodes");
+            nodesParent.transform.SetParent(transform);
         }
 
-        // Create a test path with first few nodes
-        List<int> testPathIDs = new List<int>();
-        for (int i = 0; i < Mathf.Min(5, nodes.Count); i++)
+        Vector3[] demoPositions = {
+            new Vector3(0, 0.5f, 0), new Vector3(10, 0.5f, 0),
+            new Vector3(15, 0.5f, 10), new Vector3(10, 0.5f, 20),
+            new Vector3(0, 0.5f, 20)
+        };
+
+        Quaternion demoRotation = Quaternion.Euler(0, 0, 0);
+
+        for (int i = 0; i < demoPositions.Length; i++)
         {
-            if (nodes[i] != null)
+            GameObject nodeObj = new GameObject($"NavNode_{i}");
+            nodeObj.transform.SetParent(nodesParent.transform);
+            nodeObj.transform.position = demoPositions[i];
+            nodeObj.transform.rotation = demoRotation;
+
+            NavNode node = nodeObj.AddComponent<NavNode>();
+            node.parentNavSystem = this;
+            node.nodeID = i;
+            nodes.Add(node);
+        }
+
+        AddConnectionDefinition(0, 1, true);
+        AddConnectionDefinition(1, 2, true);
+        AddConnectionDefinition(2, 3, true);
+        AddConnectionDefinition(3, 4, true);
+        AddConnectionDefinition(4, 0, true);
+        AddConnectionDefinition(1, 3, true);
+
+        RefreshGraph();
+        UpdateEditorConnectionsVisualization();
+        VisualizePath(new List<int> { 0, 1, 3, 4 });
+    }
+
+    [ContextMenu("5. Test Path 0->Last")]
+    public void TestPathZeroToLast()
+    {
+        if (nodes.Count < 2) return;
+        var path = FindPath(0, nodes.Count - 1);
+        VisualizePath(path);
+    }
+#endif
+
+    public void AddConnectionDefinition(int fromID, int toID, bool bidirectional)
+    {
+        AddConnection(fromID, toID, bidirectional);
+        RefreshGraph();
+#if UNITY_EDITOR
+        UpdateEditorConnectionsVisualization();
+#endif
+    }
+
+    public void AddConnection(int fromID, int toID, bool bidirectional)
+    {
+        bool exists = connectionDefinitions.Any(c =>
+            (c.fromNodeID == fromID && c.toNodeID == toID) ||
+            (bidirectional && c.fromNodeID == toID && c.toNodeID == fromID));
+
+        if (!exists)
+            connectionDefinitions.Add(new ConnectionDefinition(fromID, toID, bidirectional));
+    }
+
+    public NavNode CreateNode(Vector3 position, int id = -1, Quaternion? rotation = null)
+    {
+        if (nodesParent == null)
+        {
+            nodesParent = new GameObject("NavigationNodes");
+            nodesParent.transform.SetParent(transform);
+        }
+
+        int finalID = id == -1 ? nodes.Count : id;
+        GameObject nodeObj = new GameObject($"NavNode_{finalID}");
+        nodeObj.transform.SetParent(nodesParent.transform);
+        nodeObj.transform.position = position;
+        nodeObj.transform.rotation = rotation ?? Quaternion.identity;
+
+        NavNode node = nodeObj.AddComponent<NavNode>();
+        node.parentNavSystem = this;
+        node.nodeID = finalID;
+        nodes.Add(node);
+
+        RefreshGraph();
+        return node;
+    }
+
+    public void RefreshGraph()
+    {
+        nodeMap.Clear();
+        foreach (var node in nodes)
+        {
+            if (node == null) continue;
+            node.parentNavSystem = this;
+            nodeMap[node.nodeID] = node;
+        }
+    }
+
+    public void ClearPathVisualization()
+    {
+        if (pathLineRenderer != null)
+        {
+            pathLineRenderer.enabled = false;
+            pathLineRenderer.positionCount = 0;
+        }
+    }
+
+    private void SetupLineRenderer()
+    {
+        if (pathLineRenderer != null) return;
+
+        GameObject lrObj = new GameObject("PathVisualizer");
+        lrObj.transform.SetParent(transform);
+        pathLineRenderer = lrObj.AddComponent<LineRenderer>();
+
+        pathLineRenderer.material = new Material(Shader.Find("Sprites/Default"));
+        var gradient = new Gradient();
+        gradient.colorKeys = new[] {
+            new GradientColorKey(Color.yellow, 0f),
+            new GradientColorKey(Color.red, 1f)
+        };
+        pathLineRenderer.colorGradient = gradient;
+        pathLineRenderer.startWidth = 0.2f;
+        pathLineRenderer.endWidth = 0.2f;
+        pathLineRenderer.enabled = false;
+    }
+
+    public void VisualizePath(List<int> path)
+    {
+        if (path == null || path.Count == 0) return;
+
+        SetupLineRenderer();
+        pathLineRenderer.positionCount = path.Count;
+
+        for (int i = 0; i < path.Count; i++)
+        {
+            if (nodeMap.ContainsKey(path[i]))
+                pathLineRenderer.SetPosition(i, nodeMap[path[i]].worldPosition + Vector3.up * 0.5f);
+        }
+
+        pathLineRenderer.enabled = true;
+    }
+
+#if UNITY_EDITOR
+    private void UpdateEditorConnectionsVisualization()
+    {
+        if (Application.isPlaying || !visualizeAllConnectionsEditor) return;
+        DrawAllConnectionsIntoLineRenderer();
+    }
+
+    private void DrawAllConnectionsIntoLineRenderer()
+    {
+        SetupLineRenderer();
+        int posCount = connectionDefinitions.Count * 2;
+        pathLineRenderer.positionCount = posCount;
+        int idx = 0;
+
+        foreach (var conn in connectionDefinitions)
+        {
+            if (!nodeMap.ContainsKey(conn.fromNodeID) || !nodeMap.ContainsKey(conn.toNodeID)) continue;
+
+            Vector3 a = nodeMap[conn.fromNodeID].transform.position + Vector3.up * 0.3f;
+            Vector3 b = nodeMap[conn.toNodeID].transform.position + Vector3.up * 0.3f;
+
+            pathLineRenderer.SetPosition(idx++, a);
+            pathLineRenderer.SetPosition(idx++, b);
+        }
+        pathLineRenderer.enabled = true;
+    }
+#endif
+
+    #region NPC Spawning System
+
+    private IEnumerator SpawnAllNPCs()
+    {
+        activeNPCs.Clear();
+        usedNodes.Clear();
+
+        // Get all available nodes
+        List<int> availableNodes = nodeMap.Keys.ToList();
+
+        if (availableNodes.Count == 0)
+        {
+            Debug.LogError("[NPCManager] ❌ No nodes in nodeMap!");
+            yield break;
+        }
+
+        // Shuffle for randomness
+        for (int i = 0; i < availableNodes.Count; i++)
+        {
+            int randomIndex = UnityEngine.Random.Range(i, availableNodes.Count);
+            int temp = availableNodes[i];
+            availableNodes[i] = availableNodes[randomIndex];
+            availableNodes[randomIndex] = temp;
+        }
+
+        int spawnedCount = 0;
+
+        foreach (int spawnNodeID in availableNodes)
+        {
+            if (spawnedCount >= totalNPCs)
+                break;
+
+            // Skip if too close to already spawned cars
+            if (IsTooCloseToExisting(spawnNodeID))
+                continue;
+
+            // Pick random destination (different from spawn node)
+            HashSet<int> excludeSet = new HashSet<int> { spawnNodeID };
+            int destinationNodeID = GetRandomNode(excludeSet);
+
+            if (destinationNodeID == -1 || destinationNodeID == spawnNodeID)
             {
-                testPathIDs.Add(nodes[i].nodeID);
+                if (logSpawnDetails)
+                    Debug.LogWarning($"⚠️ Could not find valid destination for spawn node {spawnNodeID}");
+                continue;
+            }
+
+            // Spawn car with destination
+            if (SpawnNPCAtNode(spawnNodeID, destinationNodeID, spawnedCount))
+            {
+                spawnedCount++;
+                usedNodes.Add(spawnNodeID);
+
+                if (logSpawnDetails)
+                    Debug.Log($"✅ Spawned NPC {spawnedCount}/{totalNPCs} at node {spawnNodeID} → destination {destinationNodeID}");
+
+                yield return new WaitForSeconds(spawnStaggerDelay);
             }
         }
 
-        // Force use LineRenderer path and visualize
-        bool originalUseLineRenderer = useLineRendererPath;
-        useLineRendererPath = true;
-        VisualizePath(testPathIDs);
-
-        Debug.Log($"Game-style path test completed with {testPathIDs.Count} nodes. Check scene for LineRenderer path with arrows!");
-
-        // Restore original setting
-        useLineRendererPath = originalUseLineRenderer;
+        Debug.Log($"[NPCManager] ✅ Total spawned: {spawnedCount}/{totalNPCs}");
     }
 
-    [ContextMenu("Test LineRenderer Visibility")]
-    public void TestLineRendererVisibility()
+    private bool IsTooCloseToExisting(int nodeID)
     {
-        Debug.Log("Testing LineRenderer visibility...");
+        if (!nodeMap.ContainsKey(nodeID))
+            return true;
 
-        if (pathLineRenderer == null)
+        Vector3 nodePos = nodeMap[nodeID].worldPosition;
+
+        foreach (var npc in activeNPCs)
         {
-            SetupLineRenderer();
-            ForceLineRendererSetup();
+            if (npc.transform == null) continue;
+
+            float distance = Vector3.Distance(nodePos, npc.transform.position);
+            if (distance < minNodeDistance)
+                return true;
         }
 
-        if (nodes.Count >= 2)
+        return false;
+    }
+
+    private bool SpawnNPCAtNode(int spawnNodeID, int destinationNodeID, int index)
+    {
+        if (!nodeMap.ContainsKey(spawnNodeID))
         {
-            List<Vector3> testPositions = new List<Vector3>();
-            for (int i = 0; i < Mathf.Min(5, nodes.Count); i++)
+            Debug.LogWarning($"[NPCManager] Spawn node {spawnNodeID} not in map");
+            return false;
+        }
+
+        if (!nodeMap.ContainsKey(destinationNodeID))
+        {
+            Debug.LogWarning($"[NPCManager] Destination node {destinationNodeID} not in map");
+            return false;
+        }
+
+        // Pick random prefab
+        GameObject prefab = vehiclePrefabs[UnityEngine.Random.Range(0, vehiclePrefabs.Count)];
+        GameObject npc = Instantiate(prefab);
+        npc.name = $"NPC_Car_{index}";
+
+        // Fix collisions
+        if (autoFixCollisions)
+            FixVehicleCollisions(npc);
+
+        // Position at spawn node
+        NavNode spawnNode = nodeMap[spawnNodeID];
+        Vector3 spawnPos = spawnNode.worldPosition + Vector3.up * 0.3f;
+        npc.transform.SetPositionAndRotation(spawnPos, spawnNode.transform.rotation);
+
+        // Get controller
+        NPCVehicleController controller = npc.GetComponent<NPCVehicleController>();
+
+        if (controller == null)
+        {
+            Debug.LogError($"[NPCManager] ❌ {npc.name} missing NPCVehicleController!");
+            Destroy(npc);
+            return false;
+        }
+
+        // Initialize with spawn node and destination node
+        controller.InitializeWithDestination(this, spawnNodeID, destinationNodeID, index);
+
+        // Track
+        activeNPCs.Add(new NPCVehicleInstance(npc.transform, controller, spawnNodeID));
+
+        return true;
+    }
+
+    private void FixVehicleCollisions(GameObject vehicle)
+    {
+        // Fix all mesh colliders
+        MeshCollider[] meshColliders = vehicle.GetComponentsInChildren<MeshCollider>();
+        foreach (var mc in meshColliders)
+        {
+            if (mc.sharedMesh != null && !mc.isTrigger)
+                mc.convex = true;
+        }
+
+        // Ensure rigidbody
+        Rigidbody rb = vehicle.GetComponent<Rigidbody>();
+        if (rb == null)
+        {
+            rb = vehicle.AddComponent<Rigidbody>();
+            rb.mass = 1500f;
+            rb.linearDamping = 0.5f;
+            rb.angularDamping = 5f;
+            rb.interpolation = RigidbodyInterpolation.Interpolate;
+            rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
+            rb.constraints = RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ;
+        }
+    }
+
+    [ContextMenu("🔄 Respawn All")]
+    public void RespawnAll()
+    {
+        StopAllCoroutines();
+        ClearAllNPCs();
+        StartCoroutine(InitializeSystem());
+    }
+
+    [ContextMenu("🧹 Clear All NPCs")]
+    public void ClearAllNPCs()
+    {
+        foreach (var npc in activeNPCs)
+        {
+            if (npc != null && npc.controller && npc.controller.gameObject)
+                Destroy(npc.controller.gameObject);
+        }
+
+        activeNPCs.Clear();
+        usedNodes.Clear();
+
+        Debug.Log("[NPCManager] Cleared all NPCs");
+    }
+
+    [ContextMenu("📊 Show Stats")]
+    public void ShowStats()
+    {
+        Debug.Log($"=== NPC MANAGER STATS ===");
+        Debug.Log($"Total Nodes: {nodeMap.Count}");
+        Debug.Log($"Active NPCs: {activeNPCs.Count}");
+        Debug.Log($"Used Nodes: {usedNodes.Count}");
+        Debug.Log($"Vehicle Prefabs: {vehiclePrefabs.Count}");
+        Debug.Log($"Min Distance: {minNodeDistance}m");
+    }
+
+    #endregion
+
+    #region Debug Gizmos
+
+    private void OnDrawGizmos()
+    {
+        if (!showSpawnZones || !Application.isPlaying) return;
+
+        // Draw active NPCs
+        Gizmos.color = Color.green;
+        foreach (var npc in activeNPCs)
+        {
+            if (npc != null && npc.transform != null)
             {
-                if (nodes[i] != null)
+                Gizmos.DrawWireSphere(npc.transform.position, minNodeDistance);
+            }
+        }
+
+        // Draw used nodes
+        if (nodeMap != null)
+        {
+            Gizmos.color = Color.cyan;
+            foreach (int nodeID in usedNodes)
+            {
+                if (nodeMap.ContainsKey(nodeID))
                 {
-                    Vector3 nodePos = nodes[i].transform.position;
-                    Vector3 roadPathPos = GetRoadPathPosition(nodePos);
-                    testPositions.Add(roadPathPos);
+                    Vector3 pos = nodeMap[nodeID].worldPosition;
+                    Gizmos.DrawWireCube(pos + Vector3.up * 2f, Vector3.one * 1.5f);
                 }
             }
-
-            pathLineRenderer.positionCount = testPositions.Count;
-            pathLineRenderer.SetPositions(testPositions.ToArray());
-            pathLineRenderer.enabled = true;
-
-            Debug.Log($"LineRenderer test: {testPositions.Count} positions set using road detection, width: {pathLineRenderer.startWidth}");
-        }
-        else
-        {
-            Debug.LogWarning("Not enough nodes to test LineRenderer. Add at least 2 nodes to the scene.");
         }
     }
 
-    // Gizmo visualization
-    void OnDrawGizmos()
-    {
-        if (showConnections)
-        {
-            DrawConnections();
-        }
+    #endregion
 
-        if (showPathInEditor && currentPathIDs.Count > 1)
-        {
-            DrawPath();
-        }
-    }
-
-    void DrawConnections()
+    // 🔥 PRIORITY QUEUE FOR A*
+    public class PriorityQueue<T>
     {
-        Gizmos.color = connectionColor;
-        foreach (var connection in connections)
+        private readonly List<(T item, float priority)> elements = new();
+
+        public int Count => elements.Count;
+
+        public void Enqueue(T item, float priority)
         {
-            if (nodeMap.ContainsKey(connection.fromNodeID) && nodeMap.ContainsKey(connection.toNodeID) &&
-                nodeMap[connection.fromNodeID] != null && nodeMap[connection.toNodeID] != null)
+            elements.Add((item, priority));
+            int i = elements.Count - 1;
+            while (i > 0 && elements[i - 1].priority > elements[i].priority)
             {
-                Vector3 start = nodeMap[connection.fromNodeID].transform.position;
-                Vector3 end = nodeMap[connection.toNodeID].transform.position;
-
-                Gizmos.DrawLine(start, end);
-
-                // Draw arrow for direction
-                Vector3 direction = (end - start).normalized;
-                Vector3 arrowHead = end - direction * 0.5f;
-                Vector3 right = Vector3.Cross(Vector3.up, direction) * 0.3f;
-                Gizmos.DrawLine(arrowHead + right, end);
-                Gizmos.DrawLine(arrowHead - right, end);
-
-                // Show weight at midpoint
-#if UNITY_EDITOR
-                Vector3 midPoint = (start + end) * 0.5f;
-                UnityEditor.Handles.Label(midPoint, connection.weight.ToString("F1"));
-#endif
+                var temp = elements[i - 1];
+                elements[i - 1] = elements[i];
+                elements[i] = temp;
+                i--;
             }
         }
+
+        public T Dequeue()
+        {
+            var best = elements[0];
+            elements.RemoveAt(0);
+            return best.item;
+        }
+
+        public bool Contains(T item) => elements.Any(e => EqualityComparer<T>.Default.Equals(e.item, item));
     }
 
-    void DrawPath()
+    private class NPCVehicleInstance
     {
-        Gizmos.color = pathColor;
+        public Transform transform;
+        public NPCVehicleController controller;
+        public int spawnNodeID;
 
-        for (int i = 0; i < currentPathIDs.Count - 1; i++)
+        public NPCVehicleInstance(Transform t, NPCVehicleController c, int nodeID)
         {
-            if (nodeMap.ContainsKey(currentPathIDs[i]) && nodeMap.ContainsKey(currentPathIDs[i + 1]) &&
-                nodeMap[currentPathIDs[i]] != null && nodeMap[currentPathIDs[i + 1]] != null)
-            {
-                Vector3 start = nodeMap[currentPathIDs[i]].transform.position;
-                Vector3 end = nodeMap[currentPathIDs[i + 1]].transform.position;
-
-                // Draw path at road-detected height
-                start = GetRoadPathPosition(start);
-                end = GetRoadPathPosition(end);
-
-                Gizmos.DrawLine(start, end);
-
-                // Draw path direction arrows
-                Vector3 direction = (end - start).normalized;
-                Vector3 arrowPos = Vector3.Lerp(start, end, 0.5f);
-                Vector3 right = Vector3.Cross(Vector3.up, direction) * 0.5f;
-                Gizmos.DrawLine(arrowPos - direction * 0.3f + right, arrowPos);
-                Gizmos.DrawLine(arrowPos - direction * 0.3f - right, arrowPos);
-            }
+            transform = t;
+            controller = c;
+            spawnNodeID = nodeID;
         }
     }
 }

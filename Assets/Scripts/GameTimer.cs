@@ -30,6 +30,7 @@ public class GameTimer : MonoBehaviour
 
         if (startOnAwake)
             StartTimer();
+        //Debug.Log(Time.timeScale);
     }
 
     void Update()

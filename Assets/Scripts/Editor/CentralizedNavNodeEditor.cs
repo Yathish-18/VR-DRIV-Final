@@ -1,115 +1,150 @@
-﻿#if UNITY_EDITOR
-using UnityEngine;
-using UnityEditor;
-using System.Collections.Generic;
-using System.Linq;
+﻿//#if UNITY_EDITOR
+//using UnityEngine;
+//using UnityEditor;
+//using System.Linq;
 
-[CustomEditor(typeof(NavNode))]
-public class CentralizedNavNodeEditor : Editor
-{
-    private NavNode node;
+//[CustomEditor(typeof(NavNode))]
+//public class CentralizedNavNodeEditor : Editor
+//{
+//    private NavNode node;
 
-    void OnEnable()
-    {
-        node = (NavNode)target;
-    }
+//    void OnEnable()
+//    {
+//        node = (NavNode)target;
+//    }
 
-    public override void OnInspectorGUI()
-    {
-        DrawDefaultInspector();
+//    public override void OnInspectorGUI()
+//    {
+//        DrawDefaultInspector();
 
-        EditorGUILayout.Space();
-        EditorGUILayout.LabelField("Centralized Node Info", EditorStyles.boldLabel);
+//        EditorGUILayout.Space();
+//        EditorGUILayout.LabelField("Centralized Node Info", EditorStyles.boldLabel);
 
-        // Show parent navigation system info
-        if (node.parentNavSystem != null)
-        {
-            EditorGUILayout.ObjectField("Parent Nav System", node.parentNavSystem, typeof(CentralizedNavigationSystem), true);
+//        // Show parent navigation system info
+//        if (node.parentNavSystem != null)
+//        {
+//            EditorGUILayout.ObjectField(
+//                "Parent Nav System",
+//                node.parentNavSystem,
+//                typeof(CentralizedNavigationSystem),
+//                true);
 
-            var connections = node.parentNavSystem.connections.Where(c =>
-                c.fromNodeID == node.nodeID || (c.bidirectional && c.toNodeID == node.nodeID)).ToList();
+//            // Use connectionDefinitions instead of nonexistent Connections
+//            var connections = node.parentNavSystem.connectionDefinitions
+//                .Where(c =>
+//                    c.fromNodeID == node.nodeID ||
+//                    (c.bidirectional && c.toNodeID == node.nodeID))
+//                .ToList();
 
-            EditorGUILayout.LabelField($"Total Connections: {connections.Count}");
+//            EditorGUILayout.LabelField($"Total Connections: {connections.Count}");
 
-            foreach (var connection in connections)
-            {
-                EditorGUILayout.BeginHorizontal();
+//            foreach (var connection in connections)
+//            {
+//                EditorGUILayout.BeginHorizontal();
 
-                int otherNodeID = connection.fromNodeID == node.nodeID ? connection.toNodeID : connection.fromNodeID;
-                string direction = connection.fromNodeID == node.nodeID ? "→" : "←";
-                if (connection.bidirectional) direction = "↔";
+//                int otherNodeID = connection.fromNodeID == node.nodeID
+//                    ? connection.toNodeID
+//                    : connection.fromNodeID;
 
-                EditorGUILayout.LabelField($"{direction} Node {otherNodeID} (Weight: {connection.weight:F1})");
+//                string direction;
+//                if (connection.bidirectional)
+//                    direction = "↔";
+//                else
+//                    direction = connection.fromNodeID == node.nodeID ? "→" : "←";
 
-                if (GUILayout.Button("Remove", GUILayout.Width(60)))
-                {
-                    node.parentNavSystem.RemoveConnection(connection.fromNodeID, connection.toNodeID);
-                }
+//                EditorGUILayout.LabelField($"{direction} Node {otherNodeID}");
 
-                EditorGUILayout.EndHorizontal();
-            }
-        }
-        else
-        {
-            EditorGUILayout.HelpBox("No parent CentralizedNavigationSystem found", MessageType.Warning);
+//                if (GUILayout.Button("Remove", GUILayout.Width(60)))
+//                {
+//                    node.parentNavSystem.RemoveConnection(connection.fromNodeID, connection.toNodeID);
+//                    EditorUtility.SetDirty(node.parentNavSystem);
+//                }
 
-            if (GUILayout.Button("Find and Assign Parent Nav System"))
-            {
-                CentralizedNavigationSystem navSystem = Object.FindFirstObjectByType<CentralizedNavigationSystem>();
-                if (navSystem != null)
-                {
-                    navSystem.RegisterNode(node);
-                    EditorUtility.SetDirty(navSystem);
-                }
-            }
-        }
-    }
+//                EditorGUILayout.EndHorizontal();
+//            }
 
-    void OnSceneGUI()
-    {
-        if (node.parentNavSystem == null) return;
+//        }
+//        else
+//        {
+//            EditorGUILayout.HelpBox("No parent CentralizedNavigationSystem found", MessageType.Warning);
 
-        // Handle adding connections by Ctrl+Click
-        if (Event.current.type == EventType.MouseDown && Event.current.button == 0 && Event.current.control)
-        {
-            Ray ray = HandleUtility.GUIPointToWorldRay(Event.current.mousePosition);
-            RaycastHit hit;
+//            if (GUILayout.Button("Find and Assign Parent Nav System"))
+//            {
+//#if UNITY_2023_1_OR_NEWER
+//                CentralizedNavigationSystem navSystem =
+//                    Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+//#else
+//                CentralizedNavigationSystem navSystem =
+//                    Object.FindObjectOfType<CentralizedNavigationSystem>();
+//#endif
+//                if (navSystem != null)
+//                {
+//                    navSystem.RegisterNode(node);
+//                    EditorUtility.SetDirty(navSystem);
+//                }
+//                else
+//                {
+//                    Debug.LogWarning("No CentralizedNavigationSystem found in scene.");
+//                }
+//            }
+//        }
+//    }
 
-            if (Physics.Raycast(ray, out hit))
-            {
-                NavNode hitNode = hit.collider.GetComponent<NavNode>();
-                if (hitNode != null && hitNode != node && hitNode.parentNavSystem == node.parentNavSystem)
-                {
-                    node.parentNavSystem.AddConnection(node.nodeID, hitNode.nodeID, true);
-                    Event.current.Use();
-                }
-            }
-        }
+//    void OnSceneGUI()
+//    {
+//        if (node == null || node.parentNavSystem == null)
+//            return;
 
-        // Draw connection handles for this node
-        Handles.color = Color.cyan;
-        var nodeConnections = node.parentNavSystem.connections.Where(c =>
-            c.fromNodeID == node.nodeID || (c.bidirectional && c.toNodeID == node.nodeID)).ToList();
+//        Event e = Event.current;
 
-        foreach (var connection in nodeConnections)
-        {
-            int otherNodeID = connection.fromNodeID == node.nodeID ? connection.toNodeID : connection.fromNodeID;
+//        // Handle adding connections by Ctrl+Click
+//        if (e.type == EventType.MouseDown && e.button == 0 && e.control)
+//        {
+//            Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
+//            RaycastHit hit;
+//            if (Physics.Raycast(ray, out hit))
+//            {
+//                NavNode hitNode = hit.collider.GetComponent<NavNode>();
+//                if (hitNode != null && hitNode != node &&
+//                    hitNode.parentNavSystem == node.parentNavSystem)
+//                {
+//                    node.parentNavSystem.AddConnection(node.nodeID, hitNode.nodeID, true);
+//                    EditorUtility.SetDirty(node.parentNavSystem);
+//                    e.Use();
+//                }
+//            }
+//        }
 
-            if (node.parentNavSystem.nodeMap.ContainsKey(otherNodeID))
-            {
-                Vector3 start = node.transform.position;
-                Vector3 end = node.parentNavSystem.nodeMap[otherNodeID].transform.position;
+//        // Draw connection handles for this node
+//        Handles.color = Color.cyan;
 
-                Handles.DrawLine(start, end);
+//        var nodeConnections = node.parentNavSystem.connectionDefinitions
+//            .Where(c =>
+//                c.fromNodeID == node.nodeID ||
+//                (c.bidirectional && c.toNodeID == node.nodeID))
+//            .ToList();
 
-                // Draw remove handle at midpoint
-                Vector3 midPoint = (start + end) * 0.5f;
-                if (Handles.Button(midPoint, Quaternion.identity, 0.5f, 0.5f, Handles.SphereHandleCap))
-                {
-                    node.parentNavSystem.RemoveConnection(connection.fromNodeID, connection.toNodeID);
-                }
-            }
-        }
-    }
-}
-#endif
+//        foreach (var connection in nodeConnections)
+//        {
+//            int otherNodeID = connection.fromNodeID == node.nodeID
+//                ? connection.toNodeID
+//                : connection.fromNodeID;
+
+//            if (node.parentNavSystem.nodeMap.ContainsKey(otherNodeID))
+//            {
+//                Vector3 start = node.transform.position;
+//                Vector3 end = node.parentNavSystem.nodeMap[otherNodeID].transform.position;
+//                Handles.DrawLine(start, end);
+
+//                // Draw remove handle at midpoint
+//                Vector3 midPoint = start + (end - start) * 0.5f;
+//                if (Handles.Button(midPoint, Quaternion.identity, 0.5f, 0.5f, Handles.SphereHandleCap))
+//                {
+//                    node.parentNavSystem.RemoveConnection(connection.fromNodeID, connection.toNodeID);
+//                    EditorUtility.SetDirty(node.parentNavSystem);
+//                }
+//            }
+//        }
+//    }
+//}
+//#endif

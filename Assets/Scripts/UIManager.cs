@@ -41,7 +41,7 @@ public class UIManager : MonoBehaviour
     {
         Application.Quit();
     }
-    public void Test() 
+    public void Test()
     {
         Debug.Log("workin ui");
     }

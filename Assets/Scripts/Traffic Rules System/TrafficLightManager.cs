@@ -103,7 +103,7 @@ public class TrafficLightManager : MonoBehaviour
 
         if (logConnectionDetails)
         {
-            Debug.Log($"Registered traffic light: {currentID} at position {trafficLight.transform.position}");
+            //Debug.Log($"Registered traffic light: {currentID} at position {trafficLight.transform.position}");
         }
     }
 

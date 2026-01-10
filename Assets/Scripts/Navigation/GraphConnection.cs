@@ -1,18 +1,20 @@
-using UnityEngine;
+using System;
 
-[System.Serializable]
+[Serializable]
 public class GraphConnection
 {
     public int fromNodeID;
     public int toNodeID;
-    public float weight;
+    public float weight = 1f;
     public bool bidirectional = true;
 
-    public GraphConnection(int from, int to, float w, bool bidir = true)
+    public GraphConnection() { }
+
+    public GraphConnection(int from, int to, bool bidir = true, float w = 1f)
     {
         fromNodeID = from;
         toNodeID = to;
-        weight = w;
         bidirectional = bidir;
+        weight = w;
     }
 }

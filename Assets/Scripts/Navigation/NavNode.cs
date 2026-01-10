@@ -1,113 +1,75 @@
-using UnityEngine;
+﻿using UnityEngine;
 
-[System.Serializable]
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
 public class NavNode : MonoBehaviour
 {
-    [Header("Node Settings")]
-    public int nodeID = -1;
-    public Color nodeColor = Color.blue;
-    public float nodeSize = 1f;
-
-    [Header("Visual Settings")]
-    public bool showLabel = true;
-    public Vector3 labelOffset = Vector3.up * 2f;
-
-    [Header("Road Detection Integration")]
-    [Tooltip("Automatically adjust node position to road surface on creation")]
-    public bool snapToRoad = true;
-    [Tooltip("Layer mask for detecting road surfaces")]
-    public LayerMask roadLayerMask = 1;
-    [Tooltip("Distance to raycast down when looking for road")]
-    public float roadRaycastDistance = 50f;
-    [Tooltip("How high above current position to start raycast")]
-    public float roadRaycastUpOffset = 10f;
-
-    // Reference to parent navigation system
+    [HideInInspector] public int nodeID;
     [HideInInspector] public CentralizedNavigationSystem parentNavSystem;
 
-    private void Awake()
-    {
-        // Find and assign parent navigation system
-        FindAndAssignParent();
-
-        // Snap to road if enabled
-        if (snapToRoad)
-        {
-            SnapToRoadSurface();
-        }
-    }
+    public Vector3 worldPosition => transform.position;
 
     private void Start()
     {
-        // Ensure we're registered with the navigation system
-        FindAndAssignParent();
-    }
-
-    void FindAndAssignParent()
-    {
-        // Find navigation system if not assigned
         if (parentNavSystem == null)
         {
+#if UNITY_2023_1_OR_NEWER
             parentNavSystem = Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+#else
+            parentNavSystem = Object.FindObjectOfType<CentralizedNavigationSystem>();
+#endif
         }
 
-        // Register with the navigation system
         if (parentNavSystem != null)
-        {
             parentNavSystem.RegisterNode(this);
-        }
+        else
+            Debug.LogWarning("[NavNode] No CentralizedNavigationSystem found");
     }
 
-    /// <summary>
-    /// Snaps this node to the road surface for perfect road alignment
-    /// </summary>
-    [ContextMenu("Snap to Road Surface")]
-    public void SnapToRoadSurface()
+#if UNITY_EDITOR
+    private void OnValidate()
     {
-        Vector3 roadPos = RoadDetectionHelper.GetRoadSurfacePosition(transform.position, roadLayerMask, roadRaycastDistance, roadRaycastUpOffset);
-        if (roadPos != transform.position)
-        {
-            transform.position = roadPos;
-            Debug.Log($"Node {nodeID} snapped to road surface at {roadPos}");
-        }
+        if (parentNavSystem != null)
+            parentNavSystem.RefreshGraph();
     }
 
     private void OnDrawGizmos()
     {
-        // Draw node
-        Gizmos.color = nodeColor;
-        Gizmos.DrawWireSphere(transform.position, nodeSize);
+        // Node sphere only
+        Gizmos.color = Selection.activeGameObject == gameObject ? Color.yellow : Color.cyan;
+        Gizmos.DrawSphere(transform.position, 0.5f);
 
-        // Draw node label
-#if UNITY_EDITOR
-        if (showLabel)
-        {
-            string label = nodeID >= 0 ? $"Node {nodeID}" : gameObject.name;
-            UnityEditor.Handles.Label(transform.position + labelOffset, label);
-        }
-#endif
+        // Node ID label only
+        Handles.Label(transform.position + Vector3.up * 1.2f, $"ID: {nodeID}");
     }
 
     private void OnDrawGizmosSelected()
     {
-        // Highlight selected node
+        // Thick highlight only
         Gizmos.color = Color.yellow;
-        Gizmos.DrawSphere(transform.position, nodeSize * 1.2f);
-    }
+        Gizmos.DrawSphere(transform.position, 0.8f);
 
-    private void OnDestroy()
-    {
-        // Unregister from parent navigation system
-        if (parentNavSystem != null)
+        // Show connections only
+        if (parentNavSystem?.connectionDefinitions != null)
         {
-            parentNavSystem.UnregisterNode(this);
+            foreach (var conn in parentNavSystem.connectionDefinitions)
+            {
+                if (conn.fromNodeID == nodeID && parentNavSystem.nodeMap.ContainsKey(conn.toNodeID))
+                {
+                    Vector3 otherPos = parentNavSystem.nodeMap[conn.toNodeID].transform.position;
+                    Gizmos.color = conn.bidirectional ? Color.green : Color.red;
+                    Gizmos.DrawLine(transform.position, otherPos);
+                }
+                else if (conn.toNodeID == nodeID && conn.bidirectional && parentNavSystem.nodeMap.ContainsKey(conn.fromNodeID))
+                {
+                    Vector3 otherPos = parentNavSystem.nodeMap[conn.fromNodeID].transform.position;
+                    Gizmos.color = Color.green;
+                    Gizmos.DrawLine(transform.position, otherPos);
+                }
+            }
         }
     }
-
-    // Force this node to find and join a navigation system
-    [ContextMenu("Force Join Navigation System")]
-    public void ForceJoinNavigationSystem()
-    {
-        FindAndAssignParent();
-    }
+#endif
 }

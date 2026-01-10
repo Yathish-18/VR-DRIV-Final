@@ -10,9 +10,10 @@ public class GraphConnectionDrawer : PropertyDrawer
     {
         EditorGUI.BeginProperty(position, label, property);
 
-        position = EditorGUI.PrefixLabel(position, GUIUtility.GetControlID(FocusType.Passive), label);
+        position = EditorGUI.PrefixLabel(position,
+            GUIUtility.GetControlID(FocusType.Passive), label);
 
-        var indent = EditorGUI.indentLevel;
+        int indent = EditorGUI.indentLevel;
         EditorGUI.indentLevel = 0;
 
         // Calculate rects
@@ -23,14 +24,21 @@ public class GraphConnectionDrawer : PropertyDrawer
         var bidirRect = new Rect(position.x + 140, position.y, 15, position.height);
 
         // Draw fields
-        EditorGUI.PropertyField(fromRect, property.FindPropertyRelative("fromNodeID"), GUIContent.none);
+        EditorGUI.PropertyField(fromRect,
+            property.FindPropertyRelative("fromNodeID"), GUIContent.none);
 
-        SerializedProperty bidirectionalProp = property.FindPropertyRelative("bidirectional");
+        SerializedProperty bidirectionalProp =
+            property.FindPropertyRelative("bidirectional");
+
         string arrow = bidirectionalProp.boolValue ? "↔" : "→";
         EditorGUI.LabelField(arrowRect, arrow);
 
-        EditorGUI.PropertyField(toRect, property.FindPropertyRelative("toNodeID"), GUIContent.none);
-        EditorGUI.PropertyField(weightRect, property.FindPropertyRelative("weight"), GUIContent.none);
+        EditorGUI.PropertyField(toRect,
+            property.FindPropertyRelative("toNodeID"), GUIContent.none);
+
+        EditorGUI.PropertyField(weightRect,
+            property.FindPropertyRelative("weight"), GUIContent.none);
+
         EditorGUI.PropertyField(bidirRect, bidirectionalProp, GUIContent.none);
 
         EditorGUI.indentLevel = indent;
