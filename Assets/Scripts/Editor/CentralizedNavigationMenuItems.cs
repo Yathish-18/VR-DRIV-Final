@@ -194,7 +194,7 @@ public static class CentralizedNavigationMenuItems
 
         if (navSystem != null)
         {
-            navSystem.TestLineRendererVisibility();
+           // navSystem.TestLineRendererVisibility();
             Debug.Log("Line Renderer test completed. Check Scene view for visibility.");
         }
         else
