@@ -14,7 +14,7 @@ public class ConnectionDefinition
     public int toNodeID;
 
     [Tooltip("If true, creates a two-way connection. If false, only from -> to")]
-    public bool bidirectional = true;
+    public bool bidirectional = false;
 
     public ConnectionDefinition(int from, int to, bool bidir = true)
     {
