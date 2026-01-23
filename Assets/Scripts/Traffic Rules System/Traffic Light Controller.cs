@@ -20,14 +20,16 @@ public class TrafficLightController : MonoBehaviour
     public float onEmissionIntensity = 2f;
     public float offEmissionIntensity = 0f;
 
-    [Header("Timing Settings")]
+    [Header("Timing Settings (Only used if not managed by intersection)")]
     public float greenDuration = 10f;
     public float yellowDuration = 3f;
     public float redDuration = 8f;
 
     [Header("Control Settings")]
-    public bool autoStart = true;
+    public bool autoStart = false; // Disabled by default - let IntersectionManager control
     public bool enableManualControl = false; // Disabled by default for managed lights
+    [Tooltip("If true, this light is managed by a TrafficLightIntersectionManager")]
+    public bool isManagedByIntersection = true;
 
     // Current state of the traffic light
     public enum LightState
@@ -55,10 +57,13 @@ public class TrafficLightController : MonoBehaviour
     {
         InitializeLights();
 
-        // Register with TrafficLightManager
-        RegisterWithManager();
+        // Only register with TrafficLightManager if not managed by intersection
+        if (!isManagedByIntersection)
+        {
+            RegisterWithManager();
+        }
 
-        if (autoStart)
+        if (autoStart && !isManagedByIntersection)
         {
             StartTrafficLight();
         }
@@ -91,7 +96,7 @@ public class TrafficLightController : MonoBehaviour
     void OnDestroy()
     {
         // Unregister from TrafficLightManager
-        if (TrafficLightManager.Instance != null)
+        if (TrafficLightManager.Instance != null && !isManagedByIntersection)
         {
             TrafficLightManager.Instance.UnregisterTrafficLight(this);
         }
@@ -135,7 +140,7 @@ public class TrafficLightController : MonoBehaviour
 
     void Update()
     {
-        if (enableManualControl)
+        if (enableManualControl && !isManagedByIntersection)
         {
             HandleManualInput();
         }
@@ -164,7 +169,7 @@ public class TrafficLightController : MonoBehaviour
 
     public void StartTrafficLight()
     {
-        if (!isRunning)
+        if (!isRunning && !isManagedByIntersection)
         {
             isRunning = true;
             lightCycleCoroutine = StartCoroutine(TrafficLightCycle());
