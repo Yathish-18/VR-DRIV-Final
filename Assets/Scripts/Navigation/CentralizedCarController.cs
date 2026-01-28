@@ -6,15 +6,23 @@ public class CentralizedCarController : MonoBehaviour
     public CentralizedNavigationSystem navSystem;
     public NavNode targetNode;
     public bool autoFindPath = false;
+    public bool followPath = true;
     public bool showDebugLogs = false;
 
     [Header("Driving")]
     public float moveSpeed = 5f;
     public float rotationSpeed = 2f;
 
+    [Header("Dynamic Route Update")]
+    public bool autoUpdateRoute = true;
+    public float routeUpdateInterval = 3f; // Recalculate every X seconds
+    public float offRouteThreshold = 20f; // Distance to trigger immediate recalculation
+
     private List<int> currentPath = new List<int>();
     private int currentWaypointIndex = 0;
     private Rigidbody rb;
+    private float routeUpdateTimer = 0f;
+    private int lastClosestNodeID = -1;
 
     void Awake()
     {
@@ -57,6 +65,29 @@ public class CentralizedCarController : MonoBehaviour
             if (showDebugLogs) Debug.Log("[Car] Space pressed – recalculating path");
             FindAndFollowPath();
         }
+
+        // Auto update route system
+        if (autoUpdateRoute && targetNode != null && navSystem != null)
+        {
+            routeUpdateTimer += Time.deltaTime;
+
+            // Check if player went off-route
+            if (IsPlayerOffRoute())
+            {
+                if (showDebugLogs) Debug.Log("[Car] Player off-route! Recalculating immediately...");
+                FindAndFollowPath();
+                routeUpdateTimer = 0f;
+            }
+            // Periodic update
+            else if (routeUpdateTimer >= routeUpdateInterval)
+            {
+                if (showDebugLogs) Debug.Log("[Car] Periodic route update triggered");
+                FindAndFollowPath();
+                routeUpdateTimer = 0f;
+            }
+        }
+
+        if (!followPath) return;
 
         if (navSystem == null || rb == null || currentPath == null) return;
         if (currentPath.Count == 0 || currentWaypointIndex >= currentPath.Count) return;
@@ -104,6 +135,63 @@ public class CentralizedCarController : MonoBehaviour
         }
     }
 
+    void OnDisable()
+    {
+        // Clear path visualization when script is disabled or game stops
+        if (navSystem != null)
+        {
+            navSystem.ClearPathVisualization();
+        }
+    }
+
+    void OnDestroy()
+    {
+        // Clear path visualization when object is destroyed
+        if (navSystem != null)
+        {
+            navSystem.ClearPathVisualization();
+        }
+    }
+
+    private bool IsPlayerOffRoute()
+    {
+        if (currentPath == null || currentPath.Count == 0) return false;
+
+        NavNode closestNode = GetClosestNode();
+        if (closestNode == null) return false;
+
+        int closestNodeID = closestNode.nodeID;
+
+        // Check if closest node is in current path
+        bool isOnPath = currentPath.Contains(closestNodeID);
+
+        // Check distance to current path
+        float minDistToPath = float.MaxValue;
+        foreach (int nodeID in currentPath)
+        {
+            if (navSystem.nodeMap.ContainsKey(nodeID))
+            {
+                float dist = Vector3.Distance(transform.position, navSystem.nodeMap[nodeID].worldPosition);
+                if (dist < minDistToPath)
+                {
+                    minDistToPath = dist;
+                }
+            }
+        }
+
+        // Player is off-route if:
+        // 1. Closest node is NOT in current path, OR
+        // 2. Distance to path exceeds threshold
+        bool offRoute = !isOnPath || minDistToPath > offRouteThreshold;
+
+        if (offRoute && showDebugLogs)
+        {
+            Debug.Log($"[Car] Off-route detected! Closest node: {closestNodeID}, On path: {isOnPath}, Distance to path: {minDistToPath:F2}");
+        }
+
+        return offRoute;
+    }
+
     public void FindAndFollowPath()
     {
         if (navSystem == null)
@@ -147,6 +235,7 @@ public class CentralizedCarController : MonoBehaviour
 
         currentPath = path;
         currentWaypointIndex = 1; // 0 is start node
+        lastClosestNodeID = startNode.nodeID;
 
         if (showDebugLogs)
         {

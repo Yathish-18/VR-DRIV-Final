@@ -1,6 +1,6 @@
 ﻿// TRAFFIC VEHICLE - DESTINATION-BASED NAVIGATION WITH TRAFFIC LIGHT COMPLIANCE
 // Saves complete route and navigates between random destinations
-// Now includes traffic light detection and improved vehicle-ahead detection
+// Fixed: Cars now properly stop at red lights without reversing
 
 using UnityEngine;
 using System.Collections.Generic;
@@ -52,10 +52,11 @@ public class TrafficVehicle : MonoBehaviour
     private const int MAX_RECALCULATIONS = 3;
 
     // ========================================
-    // NEW: TRAFFIC LIGHT DETECTION
+    // FIXED: TRAFFIC LIGHT DETECTION
     // ========================================
     [Header("=== TRAFFIC LIGHT DETECTION ===")]
-    [SerializeField] private float trafficLightDetectionRange = 25f;
+    [SerializeField] private float trafficLightDetectionRange = 5f;
+    [SerializeField] private float trafficLightStoppingDistance = 7f; // Distance to stop before light
     [SerializeField] private LayerMask trafficLightLayerMask = -1;
     [SerializeField] private bool enableTrafficLightCompliance = true;
 
@@ -63,9 +64,11 @@ public class TrafficVehicle : MonoBehaviour
     private bool isInTrafficLightZone = false;
     private bool isStoppedAtRedLight = false;
     private float timeEnteredRedLightZone = 0f;
+    private Vector3 redLightStopPosition = Vector3.zero;
+    private bool hasReachedStopPosition = false;
 
     // ========================================
-    // NEW: IMPROVED VEHICLE-AHEAD DETECTION
+    // IMPROVED VEHICLE-AHEAD DETECTION
     // ========================================
     [Header("=== VEHICLE AHEAD DETECTION ===")]
     [SerializeField] private float vehicleDetectionRange = 20f;
@@ -91,10 +94,11 @@ public class TrafficVehicle : MonoBehaviour
     [SerializeField] private string debugNextNodes = "";
     [SerializeField] private bool showDebugGizmos = true;
 
-    // NEW: Traffic light debug info
+    // Traffic light debug info
     [SerializeField] private bool debugAtRedLight = false;
     [SerializeField] private string debugTrafficLightID = "None";
     [SerializeField] private string debugTrafficLightState = "None";
+    [SerializeField] private float debugDistanceToTrafficLight = 0f;
     [SerializeField] private bool debugVehicleAheadDetected = false;
     [SerializeField] private float debugDistanceToVehicleAhead = 0f;
 
@@ -165,10 +169,10 @@ public class TrafficVehicle : MonoBehaviour
 
         UpdateDebugInfo();
 
-        // NEW: Detect traffic lights ahead
+        // Detect traffic lights ahead
         DetectTrafficLightAhead();
 
-        // NEW: Improved vehicle-ahead detection
+        // Improved vehicle-ahead detection
         DetectVehicleAhead();
 
         // Check for obstacles (legacy detection)
@@ -183,7 +187,7 @@ public class TrafficVehicle : MonoBehaviour
             AdvanceAlongSavedRoute();
         }
 
-        // NEW: Determine if we should stop (traffic light + vehicle ahead + obstacles)
+        // Determine if we should stop (traffic light + vehicle ahead + obstacles)
         bool shouldStopForTrafficLight = ShouldStopForTrafficLight();
         bool shouldStopForVehicle = ShouldStopForVehicleAhead();
 
@@ -199,24 +203,34 @@ public class TrafficVehicle : MonoBehaviour
         // Smooth speed transition
         currentSpeed = Mathf.SmoothDamp(currentSpeed, targetSpeed, ref speedSmoothVelocity, speedSmoothTime);
 
-        // Move the vehicle
+        // Move the vehicle (FIXED: won't reverse when stopped)
         MoveVehicle();
 
-        // Stuck detection
-        float movedDistance = Vector3.Distance(transform.position, lastValidPosition);
-        if (movedDistance < 0.1f && currentSpeed > 0.1f)
+        // Stuck detection (IMPROVED: doesn't trigger when legitimately stopped at red light)
+        if (!shouldStopForTrafficLight && !shouldStopForVehicle)
         {
-            stuckCounter++;
-            debugIsStuck = true;
-
-            if (stuckCounter >= MAX_STUCK_FRAMES)
+            float movedDistance = Vector3.Distance(transform.position, lastValidPosition);
+            if (movedDistance < 0.1f && currentSpeed > 0.1f)
             {
-                Debug.LogWarning($"[{gameObject.name}] ⚠️ STUCK for 3 seconds! Attempting recovery...");
-                RecoverFromStuck();
+                stuckCounter++;
+                debugIsStuck = true;
+
+                if (stuckCounter >= MAX_STUCK_FRAMES)
+                {
+                    Debug.LogWarning($"[{gameObject.name}] ⚠️ STUCK for 3 seconds! Attempting recovery...");
+                    RecoverFromStuck();
+                }
+            }
+            else
+            {
+                stuckCounter = 0;
+                debugIsStuck = false;
+                lastValidPosition = transform.position;
             }
         }
         else
         {
+            // Stopped for valid reason (traffic light or vehicle), reset stuck counter
             stuckCounter = 0;
             debugIsStuck = false;
             lastValidPosition = transform.position;
@@ -224,7 +238,7 @@ public class TrafficVehicle : MonoBehaviour
     }
 
     // ========================================
-    // NEW: TRAFFIC LIGHT DETECTION METHODS
+    // FIXED: TRAFFIC LIGHT DETECTION METHODS
     // ========================================
 
     /// <summary>
@@ -238,6 +252,7 @@ public class TrafficVehicle : MonoBehaviour
             isInTrafficLightZone = false;
             debugTrafficLightID = "Disabled";
             debugTrafficLightState = "N/A";
+            debugDistanceToTrafficLight = 0f;
             return;
         }
 
@@ -265,8 +280,12 @@ public class TrafficVehicle : MonoBehaviour
         // Update current traffic light
         if (closestLight != null)
         {
+            // Check if this is a new traffic light
+            bool isNewLight = (currentTrafficLight == null || currentTrafficLight != closestLight);
+
             currentTrafficLight = closestLight;
             isInTrafficLightZone = true;
+            debugDistanceToTrafficLight = closestDistance;
 
             // Update debug info
             debugTrafficLightID = currentTrafficLight.GetTrafficLightID();
@@ -275,6 +294,19 @@ public class TrafficVehicle : MonoBehaviour
             if (trafficLightController != null)
             {
                 debugTrafficLightState = trafficLightController.currentState.ToString();
+
+                // FIXED: Calculate stop position when first detecting a red light
+                if (isNewLight && trafficLightController.currentState == TrafficLightController.LightState.Red)
+                {
+                    // Calculate where to stop (before the traffic light)
+                    Vector3 directionToLight = (currentTrafficLight.transform.position - transform.position).normalized;
+                    redLightStopPosition = currentTrafficLight.transform.position - (directionToLight * trafficLightStoppingDistance);
+                    redLightStopPosition.y = transform.position.y; // Keep same height
+                    hasReachedStopPosition = false;
+
+                    if (showDebugGizmos)
+                        Debug.Log($"[{gameObject.name}] 🚦 Red light detected at {debugTrafficLightID}, stop position set at {redLightStopPosition}");
+                }
             }
             else
             {
@@ -289,25 +321,36 @@ public class TrafficVehicle : MonoBehaviour
                 // Just exited traffic light zone
                 isInTrafficLightZone = false;
                 isStoppedAtRedLight = false;
+                hasReachedStopPosition = false;
+
+                if (showDebugGizmos)
+                    Debug.Log($"[{gameObject.name}] ✅ Cleared traffic light zone");
             }
 
             currentTrafficLight = null;
             debugTrafficLightID = "None";
             debugTrafficLightState = "N/A";
+            debugDistanceToTrafficLight = 0f;
         }
     }
 
     /// <summary>
-    /// Determine if vehicle should stop for traffic light
+    /// FIXED: Determine if vehicle should stop for traffic light
     /// </summary>
     private bool ShouldStopForTrafficLight()
     {
         if (!enableTrafficLightCompliance || currentTrafficLight == null)
+        {
+            isStoppedAtRedLight = false;
             return false;
+        }
 
         TrafficLightController trafficLightController = currentTrafficLight.GetTrafficLight();
         if (trafficLightController == null)
+        {
+            isStoppedAtRedLight = false;
             return false;
+        }
 
         // Get current light state
         TrafficLightController.LightState lightState = trafficLightController.currentState;
@@ -315,40 +358,63 @@ public class TrafficVehicle : MonoBehaviour
         // Stop for red light
         if (lightState == TrafficLightController.LightState.Red)
         {
+            // Check if we've reached the stop position
+            float distanceToStopPosition = Vector3.Distance(transform.position, redLightStopPosition);
+
             if (!isStoppedAtRedLight)
             {
-                // Just entered red light zone
-                isStoppedAtRedLight = true;
-                timeEnteredRedLightZone = Time.time;
+                // Approaching red light
+                if (distanceToStopPosition < 2f || debugDistanceToTrafficLight < trafficLightStoppingDistance)
+                {
+                    // Just entered red light stopping zone
+                    isStoppedAtRedLight = true;
+                    hasReachedStopPosition = true;
+                    timeEnteredRedLightZone = Time.time;
 
-                if (showDebugGizmos)
-                    Debug.Log($"[{gameObject.name}] 🛑 Stopping for RED light at {debugTrafficLightID}");
+                    if (showDebugGizmos)
+                        Debug.Log($"[{gameObject.name}] 🛑 STOPPED at RED light {debugTrafficLightID}");
+                }
             }
 
-            return true;
+            // Stay stopped if already at red light
+            if (isStoppedAtRedLight)
+                return true;
+
+            // Still approaching, should stop
+            if (debugDistanceToTrafficLight < trafficLightStoppingDistance * 1.5f)
+                return true;
         }
 
-        // Stop for yellow light if close to intersection (cautious driving)
+        // Stop for yellow light if very close to intersection
         if (lightState == TrafficLightController.LightState.Yellow)
         {
-            float distanceToLight = Vector3.Distance(transform.position, currentTrafficLight.transform.position);
-
             // If very close to light, stop (can't safely make it through)
-            if (distanceToLight < stoppingDistance * 1.5f)
+            if (debugDistanceToTrafficLight < trafficLightStoppingDistance * 0.8f)
             {
-                if (showDebugGizmos)
-                    Debug.Log($"[{gameObject.name}] ⚠️ Stopping for YELLOW light at {debugTrafficLightID} (too close: {distanceToLight:F1}m)");
+                if (showDebugGizmos && !isStoppedAtRedLight)
+                    Debug.Log($"[{gameObject.name}] ⚠️ Stopping for YELLOW light at {debugTrafficLightID} (too close: {debugDistanceToTrafficLight:F1}m)");
+
+                isStoppedAtRedLight = true;
                 return true;
             }
         }
 
-        // Green light or far from yellow - can proceed
-        isStoppedAtRedLight = false;
+        // Green light - can proceed
+        if (lightState == TrafficLightController.LightState.Green)
+        {
+            if (isStoppedAtRedLight && showDebugGizmos)
+                Debug.Log($"[{gameObject.name}] 🟢 GREEN light! Proceeding through {debugTrafficLightID}");
+
+            isStoppedAtRedLight = false;
+            hasReachedStopPosition = false;
+            return false;
+        }
+
         return false;
     }
 
     // ========================================
-    // NEW: IMPROVED VEHICLE-AHEAD DETECTION
+    // IMPROVED VEHICLE-AHEAD DETECTION
     // ========================================
 
     /// <summary>
@@ -730,11 +796,19 @@ public class TrafficVehicle : MonoBehaviour
     }
 
     /// <summary>
-    /// Move vehicle toward target waypoint
+    /// FIXED: Move vehicle toward target waypoint (prevents reversing)
     /// </summary>
     private void MoveVehicle()
     {
         if (targetWaypoint == null) return;
+
+        // Don't move if stopped
+        if (currentSpeed < 0.1f)
+        {
+            // Apply braking force to ensure vehicle stays stopped
+            rb.linearVelocity = Vector3.Lerp(rb.linearVelocity, Vector3.zero, Time.fixedDeltaTime * 5f);
+            return;
+        }
 
         Vector3 targetPosition = targetWaypoint.position;
         Vector3 direction = (targetPosition - transform.position).normalized;
@@ -747,9 +821,12 @@ public class TrafficVehicle : MonoBehaviour
             transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.fixedDeltaTime * turnSpeed);
         }
 
-        // Move forward
-        Vector3 forwardMovement = transform.forward * currentSpeed * Time.fixedDeltaTime;
-        rb.MovePosition(rb.position + forwardMovement);
+        // FIXED: Only move forward when speed > 0 (never reverse)
+        if (currentSpeed > 0.1f)
+        {
+            Vector3 forwardMovement = transform.forward * currentSpeed * Time.fixedDeltaTime;
+            rb.MovePosition(rb.position + forwardMovement);
+        }
 
         // Lock rotation on X and Z axes
         Vector3 euler = transform.eulerAngles;
@@ -925,15 +1002,23 @@ public class TrafficVehicle : MonoBehaviour
             Gizmos.DrawWireSphere(srcPos + Vector3.up * 3f, 2f);
         }
 
-        // NEW: Traffic light detection visualization
+        // Traffic light detection visualization
         if (currentTrafficLight != null)
         {
             Gizmos.color = debugAtRedLight ? Color.red : Color.yellow;
             Gizmos.DrawLine(transform.position + Vector3.up * 2f, currentTrafficLight.transform.position);
             Gizmos.DrawWireSphere(currentTrafficLight.transform.position, 2f);
+
+            // Draw stop position for red lights
+            if (debugAtRedLight && hasReachedStopPosition)
+            {
+                Gizmos.color = Color.red;
+                Gizmos.DrawWireSphere(redLightStopPosition + Vector3.up * 0.5f, 1f);
+                Gizmos.DrawLine(redLightStopPosition, redLightStopPosition + Vector3.up * 3f);
+            }
         }
 
-        // NEW: Vehicle ahead detection visualization
+        // Vehicle ahead detection visualization
         if (detectedVehicleAhead != null)
         {
             Gizmos.color = Color.cyan;
@@ -980,6 +1065,7 @@ public class TrafficVehicle : MonoBehaviour
             $"Speed: {debugCurrentSpeed:F1} m/s ({debugCurrentSpeed * 3.6f:F0} km/h)\n" +
             $"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
             $"Traffic Light: {debugTrafficLightID} [{debugTrafficLightState}]\n" +
+            $"Distance to Light: {debugDistanceToTrafficLight:F1}m\n" +
             $"Vehicle Ahead: {(detectedVehicleAhead != null ? $"YES ({debugDistanceToVehicleAhead:F1}m)" : "NO")}\n" +
             $"Recalculations: {pathRecalculations}/{MAX_RECALCULATIONS}",
             new GUIStyle()
