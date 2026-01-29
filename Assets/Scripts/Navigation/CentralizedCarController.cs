@@ -71,15 +71,16 @@ public class CentralizedCarController : MonoBehaviour
         {
             routeUpdateTimer += Time.deltaTime;
 
-            // Check if player went off-route
-            if (IsPlayerOffRoute())
-            {
-                if (showDebugLogs) Debug.Log("[Car] Player off-route! Recalculating immediately...");
-                FindAndFollowPath();
-                routeUpdateTimer = 0f;
-            }
+            //// Check if player went off-route
+            //if (IsPlayerOffRoute())
+            //{
+            //    if (showDebugLogs) Debug.Log("[Car] Player off-route! Recalculating immediately...");
+            //    FindAndFollowPath();
+            //    routeUpdateTimer = 0f;
+            //}
             // Periodic update
-            else if (routeUpdateTimer >= routeUpdateInterval)
+            //else
+            if (routeUpdateTimer >= routeUpdateInterval)
             {
                 if (showDebugLogs) Debug.Log("[Car] Periodic route update triggered");
                 FindAndFollowPath();
