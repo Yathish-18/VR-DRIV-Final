@@ -2,14 +2,12 @@ using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using UnityEngine.SceneManagement;
+using UnityEngine.EventSystems;
 using System.Collections;
 using System.Collections.Generic;
 
 public class TrackSelectionManager : MonoBehaviour
 {
-    // Singleton instance for DontDestroyOnLoad
-    public static TrackSelectionManager Instance { get; private set; }
-
     [Header("Game Database")]
     [SerializeField] private RacingGameDatabaseSO gameDatabase;
 
@@ -44,23 +42,14 @@ public class TrackSelectionManager : MonoBehaviour
 
     [Header("Debug Settings")]
     [SerializeField] private bool enableDebugLogs = true;
+    [SerializeField] private bool ensureEventSystemOnStart = true;
 
     // Game data to pass to next scene
     public TrackSelectionData GameSessionData { get; private set; }
 
     private void Awake()
     {
-        // Singleton pattern with DontDestroyOnLoad
-        if (Instance != null && Instance != this)
-        {
-            Destroy(gameObject);
-            return;
-        }
-        else
-        {
-            Instance = this;
-            DontDestroyOnLoad(gameObject);
-        }
+        // NO SINGLETON - This script is recreated each time the scene loads
 
         // Validate database reference
         if (gameDatabase == null)
@@ -72,17 +61,128 @@ public class TrackSelectionManager : MonoBehaviour
         // Initialize game session data
         GameSessionData = new TrackSelectionData();
 
-        SetupButtonListeners();
+        if (enableDebugLogs)
+        {
+            Debug.Log("TrackSelectionManager initialized (scene instance)");
+        }
     }
 
     private void Start()
     {
         if (gameDatabase == null) return;
 
+        // Ensure EventSystem is working
+        if (ensureEventSystemOnStart)
+        {
+            StartCoroutine(EnsureEventSystemRoutine());
+        }
+
         ValidateDatabase();
+
+        // Restore previous selection from GamePersistenceManager if available
+        RestorePreviousSelection();
+
+        SetupButtonListeners();
         InitializeUI();
         UpdateTrackDisplay();
         UpdateSessionStatus();
+    }
+
+    private IEnumerator EnsureEventSystemRoutine()
+    {
+        // Wait a frame for scene to fully load
+        yield return null;
+
+        // Check for EventSystem
+        EventSystem eventSystem = EventSystem.current;
+
+        if (eventSystem == null)
+        {
+            Debug.LogWarning("No EventSystem found! Creating one...");
+            GameObject go = new GameObject("EventSystem");
+            go.AddComponent<EventSystem>();
+            go.AddComponent<StandaloneInputModule>();
+        }
+        else
+        {
+            // Refresh the EventSystem to ensure it's working
+            eventSystem.enabled = false;
+            yield return null;
+            eventSystem.enabled = true;
+
+            var inputModule = eventSystem.GetComponent<StandaloneInputModule>();
+            if (inputModule != null)
+            {
+                inputModule.enabled = false;
+                yield return null;
+                inputModule.enabled = true;
+            }
+
+            // Clear any lingering selections
+            EventSystem.current?.SetSelectedGameObject(null);
+
+            if (enableDebugLogs)
+                Debug.Log("EventSystem refreshed and ready");
+        }
+    }
+
+    private void RestorePreviousSelection()
+    {
+        // Check if we have persisted data from a previous session
+        if (GamePersistenceManager.Instance != null)
+        {
+            TrackDataSO persistedTrack = GamePersistenceManager.Instance.GetSelectedTrack();
+            WeatherConditionSO persistedWeather = GamePersistenceManager.Instance.GetSelectedWeather();
+            TimeOfDaySettingsSO persistedTime = GamePersistenceManager.Instance.GetSelectedTime();
+
+            // Restore track index
+            if (persistedTrack != null)
+            {
+                for (int i = 0; i < gameDatabase.AvailableTracks.Count; i++)
+                {
+                    if (gameDatabase.GetTrack(i) == persistedTrack ||
+                        gameDatabase.GetTrack(i)?.trackName == persistedTrack.trackName)
+                    {
+                        currentTrackIndex = i;
+                        if (enableDebugLogs)
+                            Debug.Log($"Restored track: {persistedTrack.trackName}");
+                        break;
+                    }
+                }
+            }
+
+            // Restore weather index
+            if (persistedWeather != null)
+            {
+                for (int i = 0; i < gameDatabase.WeatherConditions.Count; i++)
+                {
+                    if (gameDatabase.GetWeather(i) == persistedWeather ||
+                        gameDatabase.GetWeather(i)?.weatherName == persistedWeather.weatherName)
+                    {
+                        selectedWeatherIndex = i;
+                        if (enableDebugLogs)
+                            Debug.Log($"Restored weather: {persistedWeather.weatherName}");
+                        break;
+                    }
+                }
+            }
+
+            // Restore time index
+            if (persistedTime != null)
+            {
+                for (int i = 0; i < gameDatabase.TimeSettings.Count; i++)
+                {
+                    if (gameDatabase.GetTimeOfDay(i) == persistedTime ||
+                        gameDatabase.GetTimeOfDay(i)?.timeName == persistedTime.timeName)
+                    {
+                        selectedTimeIndex = i;
+                        if (enableDebugLogs)
+                            Debug.Log($"Restored time: {persistedTime.timeName}");
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     private void ValidateDatabase()
@@ -374,7 +474,7 @@ public class TrackSelectionManager : MonoBehaviour
         GameSessionData.timeOfDay = gameDatabase.GetTimeOfDay(selectedTimeIndex);
         GameSessionData.timestamp = System.DateTime.Now;
 
-        // PERSISTENCE: Also set data in persistence manager
+        // PERSISTENCE: Set data in persistence manager
         if (GamePersistenceManager.Instance != null)
         {
             GamePersistenceManager.Instance.SetSessionData(
@@ -429,28 +529,6 @@ public class TrackSelectionManager : MonoBehaviour
         return gameDatabase;
     }
 
-    public void ResetForTrackSelection()
-    {
-        if (enableDebugLogs)
-        {
-            Debug.Log("Reset for track selection called");
-        }
-    }
-
-    public void CleanupOnExit()
-    {
-        if (Instance == this)
-        {
-            Destroy(gameObject);
-            Instance = null;
-
-            if (enableDebugLogs)
-            {
-                Debug.Log("TrackSelectionManager cleaned up");
-            }
-        }
-    }
-
     [ContextMenu("Print Current Selection")]
     public void PrintCurrentSelection()
     {
@@ -465,6 +543,12 @@ public class TrackSelectionManager : MonoBehaviour
     public void ValidateSetup()
     {
         ValidateDatabase();
+    }
+
+    [ContextMenu("Refresh EventSystem")]
+    public void ForceRefreshEventSystem()
+    {
+        StartCoroutine(EnsureEventSystemRoutine());
     }
 }
 

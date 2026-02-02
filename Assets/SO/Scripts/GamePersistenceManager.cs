@@ -26,6 +26,10 @@ public class GamePersistenceManager : MonoBehaviour
     public bool autoSave = true;
     public bool enableDebugLogs = true;
 
+    [Header("Scene Management")]
+    [SerializeField] private string trackSelectionSceneName = "TrackSelection"; // SET THIS IN INSPECTOR
+    [SerializeField] private bool clearDataOnReturnToMenu = false; // Set true if you want fresh selection each time
+
     private void Awake()
     {
         // Singleton pattern with DontDestroyOnLoad
@@ -63,6 +67,18 @@ public class GamePersistenceManager : MonoBehaviour
     {
         if (enableDebugLogs)
             Debug.Log($"Scene loaded: {scene.name} - Data available for access");
+
+        // Optional: Clear session data when returning to track selection
+        if (clearDataOnReturnToMenu && scene.name == trackSelectionSceneName)
+        {
+            if (enableDebugLogs)
+                Debug.Log("Clearing session data on return to menu");
+
+            // Only clear session data, keep progress data
+            selectedTrack = null;
+            selectedWeather = null;
+            selectedTime = null;
+        }
     }
 
     // Main method to set track selection data (called from TrackSelectionManager)
@@ -212,4 +228,15 @@ public class GamePersistenceManager : MonoBehaviour
 
     [ContextMenu("Reset All Data")]
     public void ForceReset() => ResetAllData();
+
+    [ContextMenu("Print Current Data")]
+    public void PrintCurrentData()
+    {
+        Debug.Log($"=== PERSISTENCE MANAGER DATA ===");
+        Debug.Log($"Track: {(selectedTrack != null ? selectedTrack.trackName : "NULL")}");
+        Debug.Log($"Weather: {(selectedWeather != null ? selectedWeather.weatherName : "NULL")}");
+        Debug.Log($"Time: {(selectedTime != null ? selectedTime.timeName : "NULL")}");
+        Debug.Log($"Total Races: {totalRaces}");
+        Debug.Log($"Best Lap: {bestLapTime:F2}s");
+    }
 }
