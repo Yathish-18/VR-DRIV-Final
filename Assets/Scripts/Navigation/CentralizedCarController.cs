@@ -1,5 +1,6 @@
-﻿using UnityEngine;
+using UnityEngine;
 using System.Collections.Generic;
+using NWH.VehiclePhysics2;
 
 public class CentralizedCarController : MonoBehaviour
 {
@@ -18,11 +19,30 @@ public class CentralizedCarController : MonoBehaviour
     public float routeUpdateInterval = 3f; // Recalculate every X seconds
     public float offRouteThreshold = 20f; // Distance to trigger immediate recalculation
 
+    [Header("Traffic Light Raycast (Reaction Time)")]
+    [Tooltip("Raycast forward to detect traffic light zone collider (EnhancedTrafficLightViolationDetector)")]
+    public float raycastDistance = 60f;
+    public float raycastHeightOffset = 0.5f;
+    public LayerMask trafficLightLayerMask = -1;
+    [Tooltip("Optional: NWH VehicleController for brake/throttle input. If null, uses keyboard (S=brake, W=throttle).")]
+    public VehicleController vehicleControllerForInput;
+
     private List<int> currentPath = new List<int>();
     private int currentWaypointIndex = 0;
     private Rigidbody rb;
     private float routeUpdateTimer = 0f;
     private int lastClosestNodeID = -1;
+
+    // Traffic light reaction time (stored here; data provider reads from this)
+    private const int MaxReactionEvents = 50;
+    private List<float> _reactionTimesSec = new List<float>();
+    private TrafficLightController _trackedTrafficLight;
+    private TrafficLightController.LightState _previousLightState;
+    private float _yellowToRedTime = -1f;
+    private float _yellowToGreenTime = -1f;
+    private float _distanceAtLightChange = -1f;
+    private string _trackedLightID = "";
+    private float _sessionStartTime;
 
     void Awake()
     {
@@ -56,10 +76,16 @@ public class CentralizedCarController : MonoBehaviour
         {
             FindAndFollowPath();
         }
+
+        _sessionStartTime = Time.time;
+        _previousLightState = TrafficLightController.LightState.Red; // will be overwritten when we hit a light
     }
 
     void Update()
     {
+        // Traffic light raycast and reaction time (runs every frame when car is active)
+        DoTrafficLightRaycastAndReaction();
+
         if (Input.GetKeyDown(KeyCode.Space))
         {
             if (showDebugLogs) Debug.Log("[Car] Space pressed – recalculating path");
@@ -134,6 +160,123 @@ public class CentralizedCarController : MonoBehaviour
                 rb.linearVelocity = Vector3.zero;
             }
         }
+    }
+
+    /// <summary>Raycast hits = car is near. Only measure reaction when signal changes *after* we're already tracking (sudden change).</summary>
+    void DoTrafficLightRaycastAndReaction()
+    {
+        Vector3 origin = transform.position + Vector3.up * raycastHeightOffset;
+        Vector3 direction = transform.forward;
+        float sessionTime = Time.time - _sessionStartTime;
+
+        if (Physics.Raycast(origin, direction, out RaycastHit hit, raycastDistance, trafficLightLayerMask))
+        {
+            var detector = hit.collider.GetComponent<EnhancedTrafficLightViolationDetector>();
+            if (detector == null) return;
+
+            TrafficLightController lightController = detector.GetTrafficLight();
+            if (lightController == null) return;
+
+            float distanceToLight = hit.distance;
+            TrafficLightController.LightState currentState = lightController.currentState;
+
+            // First frame we see this light: only init tracking (no reaction yet – car just became "near")
+            if (_trackedTrafficLight != lightController)
+            {
+                _trackedTrafficLight = lightController;
+                _previousLightState = currentState;
+                _trackedLightID = lightController.GetTrafficLightID();
+                _yellowToRedTime = -1f;
+                _yellowToGreenTime = -1f;
+            }
+            else
+            {
+                // Already tracking (raycast was hitting): signal change = sudden → measure reaction
+                // Detect Yellow -> Red: record time and wait for brake
+                if (_previousLightState == TrafficLightController.LightState.Yellow && currentState == TrafficLightController.LightState.Red)
+                {
+                    _yellowToRedTime = Time.time;
+                    _distanceAtLightChange = distanceToLight;
+                    if (showDebugLogs) Debug.Log($"[Car] Yellow→Red at {_trackedLightID}, distance={distanceToLight:F1}m – measuring brake reaction");
+                }
+                // Detect Yellow -> Green: record time and wait for throttle
+                if (_previousLightState == TrafficLightController.LightState.Yellow && currentState == TrafficLightController.LightState.Green)
+                {
+                    _yellowToGreenTime = Time.time;
+                    _distanceAtLightChange = distanceToLight;
+                    if (showDebugLogs) Debug.Log($"[Car] Yellow→Green at {_trackedLightID}, distance={distanceToLight:F1}m – measuring accelerator reaction");
+                }
+                _previousLightState = currentState;
+            }
+
+            // Check for brake reaction (after Yellow->Red)
+            if (_yellowToRedTime > 0f && GetBrakeInput() > 0.05f)
+            {
+                float reactionTime = Time.time - _yellowToRedTime;
+                AddReactionTime(reactionTime);
+                if (showDebugLogs) Debug.Log($"[Car] Brake reaction: {reactionTime:F2}s at {_trackedLightID}");
+                _yellowToRedTime = -1f;
+            }
+
+            // Check for accelerator reaction (after Yellow->Green)
+            if (_yellowToGreenTime > 0f && GetThrottleInput() > 0.05f)
+            {
+                float reactionTime = Time.time - _yellowToGreenTime;
+                AddReactionTime(reactionTime);
+                if (showDebugLogs) Debug.Log($"[Car] Accelerator reaction: {reactionTime:F2}s at {_trackedLightID}");
+                _yellowToGreenTime = -1f;
+            }
+        }
+        else
+        {
+            _trackedTrafficLight = null;
+        }
+    }
+
+    float GetBrakeInput()
+    {
+        if (vehicleControllerForInput != null && vehicleControllerForInput.input != null)
+            return vehicleControllerForInput.input.InputSwappedBrakes;
+        return Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.DownArrow) ? 1f : 0f;
+    }
+
+    float GetThrottleInput()
+    {
+        if (vehicleControllerForInput != null && vehicleControllerForInput.input != null)
+            return vehicleControllerForInput.input.InputSwappedThrottle;
+        return Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow) ? 1f : 0f;
+    }
+
+    void AddReactionTime(float reactionTimeSec)
+    {
+        _reactionTimesSec.Add(reactionTimeSec);
+        if (_reactionTimesSec.Count > MaxReactionEvents)
+            _reactionTimesSec.RemoveAt(0);
+    }
+
+    /// <summary>Average reaction time this session. Data provider reads this.</summary>
+    public float GetAverageReactionTime()
+    {
+        if (_reactionTimesSec.Count == 0) return -1f;
+        float sum = 0f;
+        foreach (float t in _reactionTimesSec) sum += t;
+        return sum / _reactionTimesSec.Count;
+    }
+
+    /// <summary>Worst (slowest) reaction time this session. Data provider reads this.</summary>
+    public float GetWorstReactionTime()
+    {
+        if (_reactionTimesSec.Count == 0) return -1f;
+        float max = 0f;
+        foreach (float t in _reactionTimesSec)
+            if (t > max) max = t;
+        return max;
+    }
+
+    /// <summary>Clear reaction data (e.g. when starting new session).</summary>
+    public void ClearReactionData()
+    {
+        _reactionTimesSec.Clear();
     }
 
     void OnDisable()

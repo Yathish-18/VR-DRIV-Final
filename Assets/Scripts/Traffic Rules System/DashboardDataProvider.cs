@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using NWH.VehiclePhysics2;
 using NWH.VehiclePhysics2.Damage;
 
@@ -76,6 +76,10 @@ public class DashboardDataProvider : MonoBehaviour
         public int trafficViolations = 0;
         public int speedingIncidents = 0;
         public int laneViolations = 0;
+
+        [Header("Reaction Time (signal change after raycast hit = car near)")]
+        public float avgReactionTimeSec = -1f;
+        public float worstReactionTimeSec = -1f;
     }
 
     void Start()
@@ -227,6 +231,19 @@ public class DashboardDataProvider : MonoBehaviour
             storedData.baseScore = currentScore.baseScore;
         }
 
+        // Reaction time from car controller (raycast stores there; we read here)
+        var carController = FindObjectOfType<CentralizedCarController>();
+        if (carController != null)
+        {
+            storedData.avgReactionTimeSec = carController.GetAverageReactionTime();
+            storedData.worstReactionTimeSec = carController.GetWorstReactionTime();
+        }
+        else
+        {
+            storedData.avgReactionTimeSec = -1f;
+            storedData.worstReactionTimeSec = -1f;
+        }
+
         hasData = true;
 
         // UPDATED: Enhanced detailed debug logging
@@ -335,6 +352,9 @@ public class DashboardDataProvider : MonoBehaviour
     {
         storedData = new DashboardData();
         hasData = false;
+        var carController = FindObjectOfType<CentralizedCarController>();
+        if (carController != null)
+            carController.ClearReactionData();
     }
 
     // Public getters for real-time data
@@ -356,6 +376,18 @@ public class DashboardDataProvider : MonoBehaviour
     public float GetAverageSpeed()
     {
         return speedReadingCount > 0 ? totalSpeedSum / speedReadingCount : 0f;
+    }
+
+    // Reaction time (from car controller)
+    public float GetAvgReactionTimeSec()
+    {
+        var carController = FindObjectOfType<CentralizedCarController>();
+        return carController != null ? carController.GetAverageReactionTime() : -1f;
+    }
+    public float GetWorstReactionTimeSec()
+    {
+        var carController = FindObjectOfType<CentralizedCarController>();
+        return carController != null ? carController.GetWorstReactionTime() : -1f;
     }
 
     // UPDATED: Enhanced penalty debugging

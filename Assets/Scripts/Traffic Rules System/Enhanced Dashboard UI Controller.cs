@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using UnityEngine.SceneManagement;
@@ -40,6 +40,10 @@ public class EnhancedDriverScoringDashboard : MonoBehaviour
     [SerializeField] private TextMeshProUGUI lanePenaltyText;
     [SerializeField] private TextMeshProUGUI speedingPenaltyText;
     [SerializeField] private TextMeshProUGUI totalPenaltyText;
+
+    [Header("Reaction Time (signal change after raycast = car near)")]
+    [SerializeField] private TextMeshProUGUI avgReactionTimeText;
+    [SerializeField] private TextMeshProUGUI worstReactionTimeText;
 
     [Header("UI Colors")]
     [SerializeField] private Color excellentColor = Color.green;
@@ -110,7 +114,7 @@ public class EnhancedDriverScoringDashboard : MonoBehaviour
 
     void UpdateAllUIFromData(DashboardDataProvider.DashboardData data)
     {
-        // Basic metrics
+        // Basic metrics (all from data provider)
         if (maxSpeedText != null)
             maxSpeedText.text = $"{data.maxSpeed:F1} km/hr";
 
@@ -123,6 +127,12 @@ public class EnhancedDriverScoringDashboard : MonoBehaviour
 
         if (distanceText != null)
             distanceText.text = $"{data.totalDistance:F1}km";
+
+        // Reaction time (from data provider)
+        if (avgReactionTimeText != null)
+            avgReactionTimeText.text = data.avgReactionTimeSec >= 0f ? $"Avg reaction: {data.avgReactionTimeSec:F2}s" : "Avg reaction: —";
+        if (worstReactionTimeText != null)
+            worstReactionTimeText.text = data.worstReactionTimeSec >= 0f ? $"Worst reaction: {data.worstReactionTimeSec:F2}s" : "Worst reaction: —";
 
         // Final Score Display
         if (finalScoreText != null)
@@ -308,6 +318,8 @@ public class EnhancedDriverScoringDashboard : MonoBehaviour
         if (lanePenaltyText != null) lanePenaltyText.text = "0 PTS";
         if (speedingPenaltyText != null) speedingPenaltyText.text = "0 PTS";
         if (totalPenaltyText != null) totalPenaltyText.text = "Total: 0 PTS";
+        if (avgReactionTimeText != null) avgReactionTimeText.text = "Avg reaction: —";
+        if (worstReactionTimeText != null) worstReactionTimeText.text = "Worst reaction: —";
         AnimateNeedleToScore(0f);
     }
 

@@ -1,4 +1,4 @@
-﻿using NWH.Common.Vehicles;
+using NWH.Common.Vehicles;
 using UnityEngine;
 using UnityEngine.Serialization;
 using System.Text;
@@ -90,6 +90,14 @@ namespace NWH.VehiclePhysics2.Input
         public int shiftInto8thButton = -1;
         public int shiftInto9thButton = -1;
         public int handbrakeButton = -1;
+        [Header("Lights & Horn (G29: 0-3 face, 6-7 L2/R2, 10-11 +/- on wheel)")]
+        public int lowBeamLightsButton = -1;
+        public int highBeamLightsButton = -1;
+        public int leftBlinkerButton = -1;
+        public int rightBlinkerButton = -1;
+        public int hazardLightsButton = -1;
+        public int extraLightsButton = -1;
+        public int hornButton = -1;
         public int deviceIndex = -1;
         public bool onlyFFBDevices = true;
         public List<string> deviceNameContainsWhitelist = new List<string>();
@@ -494,16 +502,16 @@ namespace NWH.VehiclePhysics2.Input
 
         public override bool EngineStartStop() => false;
         public override float Clutch() => _clutchInput;
-        public override bool ExtraLights() => false;
-        public override bool HighBeamLights() => false;
+        public override bool ExtraLights() => GetButtonPressed(extraLightsButton);
+        public override bool HighBeamLights() => GetButtonPressed(highBeamLightsButton);
         public override float Handbrake() => _handbrakeInput;
-        public override bool HazardLights() => false;
+        public override bool HazardLights() => GetButtonPressed(hazardLightsButton);
         public override float Brakes() => _brakeInput;
         public override float Steering() => _steeringInput;
-        public override bool Horn() => false;
-        public override bool LeftBlinker() => false;
-        public override bool LowBeamLights() => false;
-        public override bool RightBlinker() => false;
+        public override bool Horn() => GetButtonPressed(hornButton);
+        public override bool LeftBlinker() => GetButtonPressed(leftBlinkerButton);
+        public override bool LowBeamLights() => GetButtonPressed(lowBeamLightsButton);
+        public override bool RightBlinker() => GetButtonPressed(rightBlinkerButton);
         public override bool ShiftDown() => _shiftDownInput;
         public override int ShiftInto() => _shiftIntoInput;
         public override bool ShiftUp() => _shiftUpInput;
@@ -602,6 +610,16 @@ namespace NWH.VehiclePhysics2.Input
             drawer.Field("shiftInto7thButton");
             drawer.Field("shiftInto8thButton");
             drawer.Field("shiftInto9thButton");
+            drawer.Field("handbrakeButton");
+            drawer.HorizontalRuler();
+            drawer.Label("Lights & Horn (set button index, -1 = disabled)");
+            drawer.Field("lowBeamLightsButton");
+            drawer.Field("highBeamLightsButton");
+            drawer.Field("leftBlinkerButton");
+            drawer.Field("rightBlinkerButton");
+            drawer.Field("hazardLightsButton");
+            drawer.Field("extraLightsButton");
+            drawer.Field("hornButton");
             drawer.EndSubsection();
             drawer.EndSubsection();
             drawer.EndEditor(this);
