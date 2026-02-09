@@ -60,6 +60,7 @@ public class DashboardDataProvider : MonoBehaviour
         public float trafficLightPenalty = 0f;
         public float lanePenalty = 0f;
         public float speedingPenalty = 0f;
+        public float turnIndicatorPenalty = 0f;
         public float totalPenalty = 0f;
 
         [Header("System Data")]
@@ -225,6 +226,7 @@ public class DashboardDataProvider : MonoBehaviour
             storedData.trafficLightPenalty = currentScore.trafficLightPenalty;
             storedData.lanePenalty = currentScore.lanePenalty;
             storedData.speedingPenalty = currentScore.speedingPenalty;
+            storedData.turnIndicatorPenalty = currentScore.turnIndicatorPenalty;
             storedData.totalPenalty = currentScore.totalPenalty;
 
             // System data

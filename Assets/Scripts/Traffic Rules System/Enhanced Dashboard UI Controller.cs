@@ -39,6 +39,7 @@ public class EnhancedDriverScoringDashboard : MonoBehaviour
     [SerializeField] private TextMeshProUGUI trafficLightPenaltyText;
     [SerializeField] private TextMeshProUGUI lanePenaltyText;
     [SerializeField] private TextMeshProUGUI speedingPenaltyText;
+    [SerializeField] private TextMeshProUGUI turnIndicatorPenaltyText;
     [SerializeField] private TextMeshProUGUI totalPenaltyText;
 
     [Header("Reaction Time (signal change after raycast = car near)")]
@@ -193,6 +194,13 @@ public class EnhancedDriverScoringDashboard : MonoBehaviour
             speedingPenaltyText.color = penalty > 0 ? poorColor : excellentColor;
         }
 
+        if (turnIndicatorPenaltyText != null)
+        {
+            int penalty = Mathf.RoundToInt(data.turnIndicatorPenalty);
+            turnIndicatorPenaltyText.text = penalty > 0 ? $"{penalty} PTS" : "0 PTS";
+            turnIndicatorPenaltyText.color = penalty > 0 ? poorColor : excellentColor;
+        }
+
         if (totalPenaltyText != null)
         {
             int totalPenalty = Mathf.RoundToInt(data.totalPenalty);
@@ -317,6 +325,7 @@ public class EnhancedDriverScoringDashboard : MonoBehaviour
         if (trafficLightPenaltyText != null) trafficLightPenaltyText.text = "0 PTS";
         if (lanePenaltyText != null) lanePenaltyText.text = "0 PTS";
         if (speedingPenaltyText != null) speedingPenaltyText.text = "0 PTS";
+        if (turnIndicatorPenaltyText != null) turnIndicatorPenaltyText.text = "0 PTS";
         if (totalPenaltyText != null) totalPenaltyText.text = "Total: 0 PTS";
         if (avgReactionTimeText != null) avgReactionTimeText.text = "Avg reaction: —";
         if (worstReactionTimeText != null) worstReactionTimeText.text = "Worst reaction: —";

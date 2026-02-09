@@ -233,6 +233,18 @@ public class CentralizedCarController : MonoBehaviour
         }
     }
 
+    /// <summary>Draw the reaction-time raycast in the Scene view for debugging.</summary>
+    void OnDrawGizmosSelected()
+    {
+        // Use same origin / direction / length as the runtime raycast
+        Vector3 origin = transform.position + Vector3.up * raycastHeightOffset;
+        Vector3 direction = transform.forward;
+
+        Gizmos.color = Color.cyan;
+        Gizmos.DrawLine(origin, origin + direction * raycastDistance);
+        Gizmos.DrawWireSphere(origin + direction * raycastDistance, 0.25f);
+    }
+
     float GetBrakeInput()
     {
         if (vehicleControllerForInput != null && vehicleControllerForInput.input != null)

@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
 using NWH.VehiclePhysics2;
@@ -33,6 +33,7 @@ public class EnhancedDriverScoringSystem : MonoBehaviour
     private float trafficLightPenalty = 0f; // Max -20 points
     private float lanePenalty = 0f; // Max -15 points
     private float speedingPenalty = 0f; // Max -15 points
+    private float turnIndicatorPenalty = 0f; // Max -10 points
 
     // Advanced Features
     private Dictionary<ViolationType, float> lastViolationTime = new Dictionary<ViolationType, float>();
@@ -171,6 +172,13 @@ public class EnhancedDriverScoringSystem : MonoBehaviour
             return;
         }
 
+        // Issue 4: Skip sampling when nearly stopped (e.g. at traffic light) – don't count toward smooth driving
+        const float minSpeedToSample = 2f; // km/h
+        if (currentSpeed < minSpeedToSample)
+        {
+            return;
+        }
+
         // Take a driving sample
         totalDrivingSamples++;
         bool isSmoothSample = EvaluateSmoothDriving(currentSpeed);
@@ -229,14 +237,16 @@ public class EnhancedDriverScoringSystem : MonoBehaviour
             debugReason += $"FastSpeedChange:{speedChangeRate:F1}>20 ";
         }
 
-        // 2. Acceleration check
+        // 2. Acceleration check – Issue 4: Allow higher deceleration (emergency braking) but stricter acceleration
         float accelerationMsSquared = (speedChangeRate / 3.6f); // Convert to m/s per sampling interval, then to m/s²
-        bool smoothAcceleration = accelerationMsSquared <= 4f; // Max 4 m/s² (reasonable for normal driving)
+        bool isDeceleration = currentSpeed < lastSpeed;
+        float accelThreshold = isDeceleration ? 6f : 4f; // 6 m/s² braking OK (emergency stop), 4 m/s² for acceleration
+        bool smoothAcceleration = accelerationMsSquared <= accelThreshold;
 
         if (!smoothAcceleration)
         {
             isSmoothSample = false;
-            debugReason += $"HardAccel:{accelerationMsSquared:F2}>4.0m/s² ";
+            debugReason += $"HardAccel:{accelerationMsSquared:F2}>{accelThreshold}m/s² ";
         }
 
         // 3. Reasonable speed check
@@ -312,7 +322,9 @@ public class EnhancedDriverScoringSystem : MonoBehaviour
     #region Penalty System (50 Points Max Deduction)
     public void RegisterTrafficLightViolation(ViolationType violationType, float basePoints = 10f)
     {
-        float penaltyPoints = CalculateAdvancedPenalty(violationType, basePoints);
+        // Issue 2: First-offense reduction – 5 pts for first, 10 for repeat (borderline cases less harsh)
+        float adjustedBase = consecutiveViolations[ViolationType.TrafficLight] == 0 ? 5f : basePoints;
+        float penaltyPoints = CalculateAdvancedPenalty(violationType, adjustedBase);
         trafficLightPenalty = Mathf.Min(trafficLightPenalty + penaltyPoints, 20f);
         UpdateViolationTracking(violationType);
         Debug.Log($"Traffic Light Violation: +{penaltyPoints} penalty (Total: {trafficLightPenalty}/20)");
@@ -320,11 +332,12 @@ public class EnhancedDriverScoringSystem : MonoBehaviour
 
     public void RegisterLaneViolation(float duration)
     {
-        float penaltyPoints = duration * 1f;
+        // Issue 2: Stronger penalty for longer violations – 1 pt/sec first 5 sec, 1.5 pt/sec after
+        float penaltyPoints = Mathf.Min(duration, 5f) * 1f + Mathf.Max(0f, duration - 5f) * 1.5f;
         lanePenalty = Mathf.Min(lanePenalty + penaltyPoints, 15f);
         laneViolationTime += duration;
         UpdateViolationTracking(ViolationType.LaneViolation);
-        Debug.Log($"Lane Violation: +{penaltyPoints} penalty (Total: {lanePenalty}/15)");
+        Debug.Log($"Lane Violation: +{penaltyPoints:F1} penalty (Total: {lanePenalty}/15)");
     }
 
     public void RegisterSpeedingViolation(float speedOverLimit)
@@ -333,6 +346,15 @@ public class EnhancedDriverScoringSystem : MonoBehaviour
         speedingPenalty = Mathf.Min(speedingPenalty + penaltyPoints, 15f);
         UpdateViolationTracking(ViolationType.Speeding);
         Debug.Log($"Speeding Violation: +{penaltyPoints} penalty (Total: {speedingPenalty}/15)");
+    }
+
+    public void RegisterTurnIndicatorViolation(ViolationType violationType, float basePoints = 3f)
+    {
+        // Issue 2: 3 pts base (more meaningful), 12 pts max (better scaling in city driving)
+        float penaltyPoints = CalculateAdvancedPenalty(violationType, basePoints);
+        turnIndicatorPenalty = Mathf.Min(turnIndicatorPenalty + penaltyPoints, 12f);
+        UpdateViolationTracking(violationType);
+        Debug.Log($"Turn Indicator Violation: +{penaltyPoints} penalty (Total: {turnIndicatorPenalty}/12)");
     }
 
     float CalculateSpeedingPenalty(float speedOverLimit)
@@ -435,6 +457,11 @@ public class EnhancedDriverScoringSystem : MonoBehaviour
             speedingPenalty = Mathf.Max(0f, speedingPenalty - recoveryAmount * 0.3f);
         }
 
+        if (turnIndicatorPenalty > 0)
+        {
+            turnIndicatorPenalty = Mathf.Max(0f, turnIndicatorPenalty - recoveryAmount * 0.2f);
+        }
+
         Debug.Log($"Recovery Bonus Applied: -{recoveryAmount} total penalty reduction");
     }
     #endregion
@@ -450,9 +477,10 @@ public class EnhancedDriverScoringSystem : MonoBehaviour
         currentScoreData.trafficLightPenalty = trafficLightPenalty;
         currentScoreData.lanePenalty = lanePenalty;
         currentScoreData.speedingPenalty = speedingPenalty;
+        currentScoreData.turnIndicatorPenalty = turnIndicatorPenalty;
 
         float positiveScore = currentScoreData.smoothDrivingPoints + currentScoreData.carHealthPoints;
-        float totalPenalty = currentScoreData.trafficLightPenalty + currentScoreData.lanePenalty + currentScoreData.speedingPenalty;
+        float totalPenalty = currentScoreData.trafficLightPenalty + currentScoreData.lanePenalty + currentScoreData.speedingPenalty + currentScoreData.turnIndicatorPenalty;
 
         currentScoreData.finalScore = Mathf.Clamp(positiveScore + 50f - totalPenalty, 0f, 100f);
         currentScoreData.finalPercentage = currentScoreData.finalScore;
@@ -484,6 +512,7 @@ public class EnhancedDriverScoringSystem : MonoBehaviour
         trafficLightPenalty = 0f;
         lanePenalty = 0f;
         speedingPenalty = 0f;
+        turnIndicatorPenalty = 0f;
 
         speedHistory.Clear();
         smoothnessHistory.Clear();
@@ -540,7 +569,8 @@ public class EnhancedDriverScoringSystem : MonoBehaviour
     {
         TrafficLight,
         LaneViolation,
-        Speeding
+        Speeding,
+        TurnIndicator
     }
 
     public enum DriverGrade
@@ -557,6 +587,7 @@ public class EnhancedDriverScoringSystem : MonoBehaviour
         public float trafficLightPenalty = 0f;
         public float lanePenalty = 0f;
         public float speedingPenalty = 0f;
+        public float turnIndicatorPenalty = 0f;
         public float totalPenalty = 0f;
         public float finalScore = 0f;
         public float finalPercentage = 0f;
