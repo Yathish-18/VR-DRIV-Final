@@ -129,11 +129,11 @@ public class EnhancedDriverScoringDashboard : MonoBehaviour
         if (distanceText != null)
             distanceText.text = $"{data.totalDistance:F1}km";
 
-        // Reaction time (from data provider)
+        // Reaction time (from data provider) - display only the value (or dash) with no label
         if (avgReactionTimeText != null)
-            avgReactionTimeText.text = data.avgReactionTimeSec >= 0f ? $"Avg reaction: {data.avgReactionTimeSec:F2}s" : "Avg reaction: —";
+            avgReactionTimeText.text = data.avgReactionTimeSec >= 0f ? $"{data.avgReactionTimeSec:F2}s" : "—";
         if (worstReactionTimeText != null)
-            worstReactionTimeText.text = data.worstReactionTimeSec >= 0f ? $"Worst reaction: {data.worstReactionTimeSec:F2}s" : "Worst reaction: —";
+            worstReactionTimeText.text = data.worstReactionTimeSec >= 0f ? $"{data.worstReactionTimeSec:F2}s" : "—";
 
         // Final Score Display
         if (finalScoreText != null)
@@ -327,8 +327,8 @@ public class EnhancedDriverScoringDashboard : MonoBehaviour
         if (speedingPenaltyText != null) speedingPenaltyText.text = "0 PTS";
         if (turnIndicatorPenaltyText != null) turnIndicatorPenaltyText.text = "0 PTS";
         if (totalPenaltyText != null) totalPenaltyText.text = "Total: 0 PTS";
-        if (avgReactionTimeText != null) avgReactionTimeText.text = "Avg reaction: —";
-        if (worstReactionTimeText != null) worstReactionTimeText.text = "Worst reaction: —";
+        if (avgReactionTimeText != null) avgReactionTimeText.text = "—";
+        if (worstReactionTimeText != null) worstReactionTimeText.text = "—";
         AnimateNeedleToScore(0f);
     }
 
