@@ -19,12 +19,13 @@ public class CentralizedCarController : MonoBehaviour
     public float routeUpdateInterval = 3f; // Recalculate every X seconds
     public float offRouteThreshold = 20f; // Distance to trigger immediate recalculation
 
-    [Header("Traffic Light Raycast (Reaction Time)")]
-    [Tooltip("Raycast forward to detect traffic light zone collider (EnhancedTrafficLightViolationDetector)")]
-    public float raycastDistance = 60f;
+    [Header("Car Ahead Raycast (Brake Reaction Time)")]
+    [Tooltip("Raycast distance = max range AND threshold. If car detected within this distance, measure brake reaction time.")]
+    public float raycastDistance = 50f;
     public float raycastHeightOffset = 0.5f;
-    public LayerMask trafficLightLayerMask = -1;
-    [Tooltip("Optional: NWH VehicleController for brake/throttle input. If null, uses keyboard (S=brake, W=throttle).")]
+    [Tooltip("LayerMask recommended: assign vehicles to a 'Vehicle' layer so raycast only hits cars. Tag can't filter raycast; we still need VehicleController check when using Everything.")]
+    public LayerMask vehicleRaycastLayerMask = -1;
+    [Tooltip("Optional: NWH VehicleController for brake input. If null, uses keyboard (S=brake).")]
     public VehicleController vehicleControllerForInput;
 
     private List<int> currentPath = new List<int>();
@@ -33,15 +34,10 @@ public class CentralizedCarController : MonoBehaviour
     private float routeUpdateTimer = 0f;
     private int lastClosestNodeID = -1;
 
-    // Traffic light reaction time (stored here; data provider reads from this)
+    // Car-ahead brake reaction time (stored here; data provider reads from this)
     private const int MaxReactionEvents = 50;
     private List<float> _reactionTimesSec = new List<float>();
-    private TrafficLightController _trackedTrafficLight;
-    private TrafficLightController.LightState _previousLightState;
-    private float _yellowToRedTime = -1f;
-    private float _yellowToGreenTime = -1f;
-    private float _distanceAtLightChange = -1f;
-    private string _trackedLightID = "";
+    private float _carAheadDetectedTime = -1f;
     private float _sessionStartTime;
 
     void Awake()
@@ -78,13 +74,12 @@ public class CentralizedCarController : MonoBehaviour
         }
 
         _sessionStartTime = Time.time;
-        _previousLightState = TrafficLightController.LightState.Red; // will be overwritten when we hit a light
     }
 
     void Update()
     {
-        // Traffic light raycast and reaction time (runs every frame when car is active)
-        DoTrafficLightRaycastAndReaction();
+        // Car-ahead raycast: detect vehicle in front, measure brake reaction time
+        DoCarAheadRaycastAndReaction();
 
         if (Input.GetKeyDown(KeyCode.Space))
         {
@@ -162,87 +157,53 @@ public class CentralizedCarController : MonoBehaviour
         }
     }
 
-    /// <summary>Raycast hits = car is near. Only measure reaction when signal changes *after* we're already tracking (sudden change).</summary>
-    void DoTrafficLightRaycastAndReaction()
+    /// <summary>Raycast detects car in front (close). Reaction time = time from detection until player brakes.</summary>
+    void DoCarAheadRaycastAndReaction()
     {
         Vector3 origin = transform.position + Vector3.up * raycastHeightOffset;
         Vector3 direction = transform.forward;
-        float sessionTime = Time.time - _sessionStartTime;
 
-        if (Physics.Raycast(origin, direction, out RaycastHit hit, raycastDistance, trafficLightLayerMask))
+        if (Physics.Raycast(origin, direction, out RaycastHit hit, raycastDistance, vehicleRaycastLayerMask))
         {
-            var detector = hit.collider.GetComponent<EnhancedTrafficLightViolationDetector>();
-            if (detector == null) return;
+            // Check if hit object is a vehicle (not self)
+            VehicleController hitVehicle = hit.collider.GetComponentInParent<VehicleController>();
+            if (hitVehicle == null) hitVehicle = hit.collider.GetComponent<VehicleController>();
+            if (hitVehicle == null || hitVehicle.transform == transform) return;
 
-            TrafficLightController lightController = detector.GetTrafficLight();
-            if (lightController == null) return;
+            float distanceToCar = hit.distance;
+            // Raycast already filtered by distance, so if we hit, car is within raycastDistance
 
-            float distanceToLight = hit.distance;
-            TrafficLightController.LightState currentState = lightController.currentState;
-
-            // First frame we see this light: only init tracking (no reaction yet – car just became "near")
-            if (_trackedTrafficLight != lightController)
+            // First time we see car ahead: start reaction timer
+            if (_carAheadDetectedTime < 0f)
             {
-                _trackedTrafficLight = lightController;
-                _previousLightState = currentState;
-                _trackedLightID = lightController.GetTrafficLightID();
-                _yellowToRedTime = -1f;
-                _yellowToGreenTime = -1f;
-            }
-            else
-            {
-                // Already tracking (raycast was hitting): signal change = sudden → measure reaction
-                // Detect Yellow -> Red: record time and wait for brake
-                if (_previousLightState == TrafficLightController.LightState.Yellow && currentState == TrafficLightController.LightState.Red)
-                {
-                    _yellowToRedTime = Time.time;
-                    _distanceAtLightChange = distanceToLight;
-                    if (showDebugLogs) Debug.Log($"[Car] Yellow→Red at {_trackedLightID}, distance={distanceToLight:F1}m – measuring brake reaction");
-                }
-                // Detect Yellow -> Green: record time and wait for throttle
-                if (_previousLightState == TrafficLightController.LightState.Yellow && currentState == TrafficLightController.LightState.Green)
-                {
-                    _yellowToGreenTime = Time.time;
-                    _distanceAtLightChange = distanceToLight;
-                    if (showDebugLogs) Debug.Log($"[Car] Yellow→Green at {_trackedLightID}, distance={distanceToLight:F1}m – measuring accelerator reaction");
-                }
-                _previousLightState = currentState;
+                _carAheadDetectedTime = Time.time;
+                if (showDebugLogs) Debug.Log($"[Car] Car ahead at {distanceToCar:F1}m – measuring brake reaction");
             }
 
-            // Check for brake reaction (after Yellow->Red)
-            if (_yellowToRedTime > 0f && GetBrakeInput() > 0.05f)
+            // Player braked: record reaction time
+            if (GetBrakeInput() > 0.05f)
             {
-                float reactionTime = Time.time - _yellowToRedTime;
+                float reactionTime = Time.time - _carAheadDetectedTime;
                 AddReactionTime(reactionTime);
-                if (showDebugLogs) Debug.Log($"[Car] Brake reaction: {reactionTime:F2}s at {_trackedLightID}");
-                _yellowToRedTime = -1f;
-            }
-
-            // Check for accelerator reaction (after Yellow->Green)
-            if (_yellowToGreenTime > 0f && GetThrottleInput() > 0.05f)
-            {
-                float reactionTime = Time.time - _yellowToGreenTime;
-                AddReactionTime(reactionTime);
-                if (showDebugLogs) Debug.Log($"[Car] Accelerator reaction: {reactionTime:F2}s at {_trackedLightID}");
-                _yellowToGreenTime = -1f;
+                if (showDebugLogs) Debug.Log($"[Car] Brake reaction: {reactionTime:F2}s (car ahead {distanceToCar:F1}m)");
+                _carAheadDetectedTime = -1f;
             }
         }
         else
         {
-            _trackedTrafficLight = null;
+            _carAheadDetectedTime = -1f;
         }
     }
 
-    /// <summary>Draw the reaction-time raycast in the Scene view for debugging.</summary>
+    /// <summary>Draw the car-ahead reaction-time raycast in the Scene view.</summary>
     void OnDrawGizmosSelected()
     {
-        // Use same origin / direction / length as the runtime raycast
         Vector3 origin = transform.position + Vector3.up * raycastHeightOffset;
         Vector3 direction = transform.forward;
 
         Gizmos.color = Color.cyan;
         Gizmos.DrawLine(origin, origin + direction * raycastDistance);
-        Gizmos.DrawWireSphere(origin + direction * raycastDistance, 0.25f);
+        Gizmos.DrawWireSphere(origin + direction * raycastDistance, 0.3f);
     }
 
     float GetBrakeInput()

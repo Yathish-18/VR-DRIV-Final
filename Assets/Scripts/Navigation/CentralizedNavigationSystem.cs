@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // CENTRALIZED NAVIGATION SYSTEM - COMPLETE
 // ============================================================================
 // Supports destination-based traffic with A* pathfinding
@@ -522,6 +522,10 @@ public class CentralizedNavigationSystem : MonoBehaviour
         }
     }
 
+    [Header("Path Visualization")]
+    [Tooltip("Vertical offset for the path line renderer. Set to 0 to lie exactly on waypoints (e.g. y=0), or slightly above road if needed.")]
+    public float pathLineHeightOffset = 0f;
+
     private void SetupLineRenderer()
     {
         if (pathLineRenderer != null) return;
@@ -552,7 +556,11 @@ public class CentralizedNavigationSystem : MonoBehaviour
         for (int i = 0; i < path.Count; i++)
         {
             if (nodeMap.ContainsKey(path[i]) && nodeMap[path[i]] != null)
-                pathLineRenderer.SetPosition(i, nodeMap[path[i]].worldPosition + Vector3.up * 0.5f);
+            {
+                Vector3 pos = nodeMap[path[i]].worldPosition;
+                pos.y += pathLineHeightOffset;
+                pathLineRenderer.SetPosition(i, pos);
+            }
         }
 
         pathLineRenderer.enabled = true;
