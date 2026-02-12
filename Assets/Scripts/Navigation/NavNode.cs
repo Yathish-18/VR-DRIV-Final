@@ -35,41 +35,41 @@ public class NavNode : MonoBehaviour
             parentNavSystem.RefreshGraph();
     }
 
-    private void OnDrawGizmos()
-    {
-        // Node sphere only
-        Gizmos.color = Selection.activeGameObject == gameObject ? Color.yellow : Color.cyan;
-        Gizmos.DrawSphere(transform.position, 0.5f);
+    //private void OnDrawGizmos()
+    //{
+    //    // Node sphere only
+    //    Gizmos.color = Selection.activeGameObject == gameObject ? Color.yellow : Color.cyan;
+    //    Gizmos.DrawSphere(transform.position, 0.5f);
 
-        // Node ID label only
-        Handles.Label(transform.position + Vector3.up * 1.2f, $"ID: {nodeID}");
-    }
+    //    // Node ID label only
+    //    Handles.Label(transform.position + Vector3.up * 1.2f, $"ID: {nodeID}");
+    //}
 
-    private void OnDrawGizmosSelected()
-    {
-        // Thick highlight only
-        Gizmos.color = Color.yellow;
-        Gizmos.DrawSphere(transform.position, 0.8f);
+    //private void OnDrawGizmosSelected()
+    //{
+    //    // Thick highlight only
+    //    Gizmos.color = Color.yellow;
+    //    Gizmos.DrawSphere(transform.position, 0.8f);
 
-        // Show connections only
-        if (parentNavSystem?.connectionDefinitions != null)
-        {
-            foreach (var conn in parentNavSystem.connectionDefinitions)
-            {
-                if (conn.fromNodeID == nodeID && parentNavSystem.nodeMap.ContainsKey(conn.toNodeID))
-                {
-                    Vector3 otherPos = parentNavSystem.nodeMap[conn.toNodeID].transform.position;
-                    Gizmos.color = conn.bidirectional ? Color.green : Color.red;
-                    Gizmos.DrawLine(transform.position, otherPos);
-                }
-                else if (conn.toNodeID == nodeID && conn.bidirectional && parentNavSystem.nodeMap.ContainsKey(conn.fromNodeID))
-                {
-                    Vector3 otherPos = parentNavSystem.nodeMap[conn.fromNodeID].transform.position;
-                    Gizmos.color = Color.green;
-                    Gizmos.DrawLine(transform.position, otherPos);
-                }
-            }
-        }
-    }
+    //    // Show connections only
+    //    if (parentNavSystem?.connectionDefinitions != null)
+    //    {
+    //        foreach (var conn in parentNavSystem.connectionDefinitions)
+    //        {
+    //            if (conn.fromNodeID == nodeID && parentNavSystem.nodeMap.ContainsKey(conn.toNodeID))
+    //            {
+    //                Vector3 otherPos = parentNavSystem.nodeMap[conn.toNodeID].transform.position;
+    //                Gizmos.color = conn.bidirectional ? Color.green : Color.red;
+    //                Gizmos.DrawLine(transform.position, otherPos);
+    //            }
+    //            else if (conn.toNodeID == nodeID && conn.bidirectional && parentNavSystem.nodeMap.ContainsKey(conn.fromNodeID))
+    //            {
+    //                Vector3 otherPos = parentNavSystem.nodeMap[conn.fromNodeID].transform.position;
+    //                Gizmos.color = Color.green;
+    //                Gizmos.DrawLine(transform.position, otherPos);
+    //            }
+    //        }
+    //    }
+    //}
 #endif
 }
