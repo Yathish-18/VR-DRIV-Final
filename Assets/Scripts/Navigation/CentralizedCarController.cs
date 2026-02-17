@@ -16,17 +16,20 @@ public class CentralizedCarController : MonoBehaviour
 
     [Header("Dynamic Route Update")]
     public bool autoUpdateRoute = true;
-    public float routeUpdateInterval = 3f; // Recalculate every X seconds
-    public float offRouteThreshold = 20f; // Distance to trigger immediate recalculation
+    public float routeUpdateInterval = 3f;
+    public float offRouteThreshold = 20f;
 
     [Header("Car Ahead Raycast (Brake Reaction Time)")]
     [Tooltip("Raycast distance = max range AND threshold. If car detected within this distance, measure brake reaction time.")]
     public float raycastDistance = 50f;
     public float raycastHeightOffset = 0.5f;
-    [Tooltip("LayerMask recommended: assign vehicles to a 'Vehicle' layer so raycast only hits cars. Tag can't filter raycast; we still need VehicleController check when using Everything.")]
+    [Tooltip("LayerMask recommended: assign vehicles to a 'Vehicle' layer so raycast only hits cars.")]
     public LayerMask vehicleRaycastLayerMask = -1;
     [Tooltip("Optional: NWH VehicleController for brake input. If null, uses keyboard (S=brake).")]
     public VehicleController vehicleControllerForInput;
+
+    [Header("Debug Gizmos")]
+    public bool showDebugGizmos = true;
 
     private List<int> currentPath = new List<int>();
     private int currentWaypointIndex = 0;
@@ -39,6 +42,9 @@ public class CentralizedCarController : MonoBehaviour
     private List<float> _reactionTimesSec = new List<float>();
     private float _carAheadDetectedTime = -1f;
     private float _sessionStartTime;
+
+    // FIX #2: prevents brake-held spam after a reaction is recorded
+    private bool _waitingForBrakeRelease = false;
 
     void Awake()
     {
@@ -64,21 +70,16 @@ public class CentralizedCarController : MonoBehaviour
         }
 
         if (showDebugLogs)
-        {
             Debug.Log($"[Car] Start. navSystem={(navSystem != null)}, targetNode={(targetNode != null)}");
-        }
 
         if (autoFindPath && targetNode != null)
-        {
             FindAndFollowPath();
-        }
 
         _sessionStartTime = Time.time;
     }
 
     void Update()
     {
-        // Car-ahead raycast: detect vehicle in front, measure brake reaction time
         DoCarAheadRaycastAndReaction();
 
         if (Input.GetKeyDown(KeyCode.Space))
@@ -87,20 +88,10 @@ public class CentralizedCarController : MonoBehaviour
             FindAndFollowPath();
         }
 
-        // Auto update route system
         if (autoUpdateRoute && targetNode != null && navSystem != null)
         {
             routeUpdateTimer += Time.deltaTime;
 
-            //// Check if player went off-route
-            //if (IsPlayerOffRoute())
-            //{
-            //    if (showDebugLogs) Debug.Log("[Car] Player off-route! Recalculating immediately...");
-            //    FindAndFollowPath();
-            //    routeUpdateTimer = 0f;
-            //}
-            // Periodic update
-            //else
             if (routeUpdateTimer >= routeUpdateInterval)
             {
                 if (showDebugLogs) Debug.Log("[Car] Periodic route update triggered");
@@ -110,7 +101,6 @@ public class CentralizedCarController : MonoBehaviour
         }
 
         if (!followPath) return;
-
         if (navSystem == null || rb == null || currentPath == null) return;
         if (currentPath.Count == 0 || currentWaypointIndex >= currentPath.Count) return;
 
@@ -136,11 +126,7 @@ public class CentralizedCarController : MonoBehaviour
         {
             direction.Normalize();
             Quaternion targetRotation = Quaternion.LookRotation(direction);
-            transform.rotation = Quaternion.Slerp(
-                transform.rotation,
-                targetRotation,
-                rotationSpeed * Time.deltaTime
-            );
+            transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, rotationSpeed * Time.deltaTime);
             rb.linearVelocity = transform.forward * moveSpeed;
         }
         else
@@ -157,7 +143,12 @@ public class CentralizedCarController : MonoBehaviour
         }
     }
 
-    /// <summary>Raycast detects car in front (close). Reaction time = time from detection until player brakes.</summary>
+    /// <summary>
+    /// Raycast detects car in front. Accepts BOTH NWH VehicleController (player-type)
+    /// AND TrafficVehicle (NPC) cars. TrafficVehicle sits on root so GetComponentInParent
+    /// finds it from any child collider hit.
+    /// Reaction time = time from detection until player brakes.
+    /// </summary>
     void DoCarAheadRaycastAndReaction()
     {
         Vector3 origin = transform.position + Vector3.up * raycastHeightOffset;
@@ -165,45 +156,106 @@ public class CentralizedCarController : MonoBehaviour
 
         if (Physics.Raycast(origin, direction, out RaycastHit hit, raycastDistance, vehicleRaycastLayerMask))
         {
-            // Check if hit object is a vehicle (not self)
+            // ── VEHICLE TYPE CHECK ──────────────────────────────────────────────
+            // NWH player-type car: VehicleController may be anywhere in hierarchy
             VehicleController hitVehicle = hit.collider.GetComponentInParent<VehicleController>();
             if (hitVehicle == null) hitVehicle = hit.collider.GetComponent<VehicleController>();
-            if (hitVehicle == null || hitVehicle.transform == transform) return;
+
+            // NPC traffic car: TrafficVehicle is always on root
+            TrafficVehicle hitTrafficVehicle = hit.collider.GetComponentInParent<TrafficVehicle>();
+            if (hitTrafficVehicle == null) hitTrafficVehicle = hit.collider.GetComponent<TrafficVehicle>();
+
+            // Must be at least one recognized vehicle type
+            bool isRecognizedVehicle = (hitVehicle != null) || (hitTrafficVehicle != null);
+            if (!isRecognizedVehicle) return;
+
+            // FIX #3: root-based self-check covers nested hierarchies
+            if (hit.collider.transform.root == transform.root) return;
+            // ────────────────────────────────────────────────────────────────────
 
             float distanceToCar = hit.distance;
-            // Raycast already filtered by distance, so if we hit, car is within raycastDistance
 
-            // First time we see car ahead: start reaction timer
+            // FIX #2: wait for brake release before starting a new detection cycle
+            if (_waitingForBrakeRelease)
+            {
+                if (GetBrakeInput() <= 0.05f)
+                {
+                    _waitingForBrakeRelease = false;
+                    if (showDebugLogs) Debug.Log("[Car] Brake released – ready for next reaction measurement");
+                }
+                return;
+            }
+
+            // FIX #1: else-if ensures detection frame != brake-check frame
+            // (prevents instant 0s recording when player is already braking)
             if (_carAheadDetectedTime < 0f)
             {
                 _carAheadDetectedTime = Time.time;
-                if (showDebugLogs) Debug.Log($"[Car] Car ahead at {distanceToCar:F1}m – measuring brake reaction");
-            }
 
-            // Player braked: record reaction time
-            if (GetBrakeInput() > 0.05f)
+                string vehicleType = hitTrafficVehicle != null ? "NPC TrafficVehicle" : "VehicleController";
+                if (showDebugLogs)
+                    Debug.Log($"[Car] Car ahead ({vehicleType}) at {distanceToCar:F1}m – measuring brake reaction");
+            }
+            else if (GetBrakeInput() > 0.05f)
             {
                 float reactionTime = Time.time - _carAheadDetectedTime;
                 AddReactionTime(reactionTime);
-                if (showDebugLogs) Debug.Log($"[Car] Brake reaction: {reactionTime:F2}s (car ahead {distanceToCar:F1}m)");
+                if (showDebugLogs)
+                    Debug.Log($"[Car] Brake reaction: {reactionTime:F2}s (car ahead {distanceToCar:F1}m)");
                 _carAheadDetectedTime = -1f;
+                _waitingForBrakeRelease = true;
             }
         }
         else
         {
+            // No vehicle in range – reset detection state.
+            // Do NOT reset _waitingForBrakeRelease here: car may briefly leave
+            // range while brake is still physically held.
             _carAheadDetectedTime = -1f;
         }
     }
 
-    /// <summary>Draw the car-ahead reaction-time raycast in the Scene view.</summary>
-    void OnDrawGizmosSelected()
+    /// <summary>
+    /// Always-visible gizmo for the car-ahead raycast.
+    /// Color encodes detection state:
+    ///   Cyan   = idle, no car in range
+    ///   Yellow = car detected, reaction timer running
+    ///   Red    = brake pressed / waiting for brake release cooldown
+    /// </summary>
+    void OnDrawGizmos()
     {
+        if (!showDebugGizmos) return;
+
         Vector3 origin = transform.position + Vector3.up * raycastHeightOffset;
         Vector3 direction = transform.forward;
 
-        Gizmos.color = Color.cyan;
+        // Color encodes current detection state
+        if (_waitingForBrakeRelease)
+            Gizmos.color = Color.red;
+        else if (_carAheadDetectedTime >= 0f)
+            Gizmos.color = Color.yellow;
+        else
+            Gizmos.color = Color.cyan;
+
+        // Main raycast line
         Gizmos.DrawLine(origin, origin + direction * raycastDistance);
+
+        // End-cap sphere at max range
         Gizmos.DrawWireSphere(origin + direction * raycastDistance, 0.3f);
+
+        // If car is detected, draw a sphere at the actual hit point
+        if (_carAheadDetectedTime >= 0f)
+        {
+            if (Physics.Raycast(origin, direction, out RaycastHit hit, raycastDistance, vehicleRaycastLayerMask))
+            {
+                Gizmos.color = Color.yellow;
+                Gizmos.DrawWireSphere(hit.point, 0.6f);
+
+                // Highlight line from origin to hit point
+                Gizmos.color = Color.red;
+                Gizmos.DrawLine(origin, hit.point);
+            }
+        }
     }
 
     float GetBrakeInput()
@@ -250,24 +302,20 @@ public class CentralizedCarController : MonoBehaviour
     public void ClearReactionData()
     {
         _reactionTimesSec.Clear();
+        _carAheadDetectedTime = -1f;
+        _waitingForBrakeRelease = false;
     }
 
     void OnDisable()
     {
-        // Clear path visualization when script is disabled or game stops
         if (navSystem != null)
-        {
             navSystem.ClearPathVisualization();
-        }
     }
 
     void OnDestroy()
     {
-        // Clear path visualization when object is destroyed
         if (navSystem != null)
-        {
             navSystem.ClearPathVisualization();
-        }
     }
 
     private bool IsPlayerOffRoute()
@@ -278,33 +326,22 @@ public class CentralizedCarController : MonoBehaviour
         if (closestNode == null) return false;
 
         int closestNodeID = closestNode.nodeID;
-
-        // Check if closest node is in current path
         bool isOnPath = currentPath.Contains(closestNodeID);
 
-        // Check distance to current path
         float minDistToPath = float.MaxValue;
         foreach (int nodeID in currentPath)
         {
             if (navSystem.nodeMap.ContainsKey(nodeID))
             {
                 float dist = Vector3.Distance(transform.position, navSystem.nodeMap[nodeID].worldPosition);
-                if (dist < minDistToPath)
-                {
-                    minDistToPath = dist;
-                }
+                if (dist < minDistToPath) minDistToPath = dist;
             }
         }
 
-        // Player is off-route if:
-        // 1. Closest node is NOT in current path, OR
-        // 2. Distance to path exceeds threshold
         bool offRoute = !isOnPath || minDistToPath > offRouteThreshold;
 
         if (offRoute && showDebugLogs)
-        {
             Debug.Log($"[Car] Off-route detected! Closest node: {closestNodeID}, On path: {isOnPath}, Distance to path: {minDistToPath:F2}");
-        }
 
         return offRoute;
     }
@@ -321,7 +358,6 @@ public class CentralizedCarController : MonoBehaviour
             Debug.LogWarning("[Car] targetNode is NULL – assign a NavNode as target");
             return;
         }
-
         if (navSystem.nodes == null || navSystem.nodes.Count == 0)
         {
             Debug.LogWarning("[Car] navSystem has no nodes – run Collect All Nodes / Setup Demo Scene");
@@ -336,10 +372,8 @@ public class CentralizedCarController : MonoBehaviour
         }
 
         if (showDebugLogs)
-        {
             Debug.Log($"[Car] Finding path from node {startNode.nodeID} at {startNode.worldPosition} " +
                       $"to node {targetNode.nodeID} at {targetNode.worldPosition}");
-        }
 
         List<int> path = navSystem.FindPath(startNode.nodeID, targetNode.nodeID);
         if (path == null || path.Count == 0)
@@ -351,7 +385,7 @@ public class CentralizedCarController : MonoBehaviour
         }
 
         currentPath = path;
-        currentWaypointIndex = 1; // 0 is start node
+        currentWaypointIndex = 1;
         lastClosestNodeID = startNode.nodeID;
 
         if (showDebugLogs)
@@ -381,9 +415,7 @@ public class CentralizedCarController : MonoBehaviour
         }
 
         if (showDebugLogs && closest != null)
-        {
             Debug.Log($"[Car] Closest node is {closest.nodeID} at distance {closestDist:F2}");
-        }
 
         return closest;
     }
