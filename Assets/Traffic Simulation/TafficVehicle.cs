@@ -57,6 +57,10 @@ public class TrafficVehicle : MonoBehaviour
     [Header("=== TRAFFIC LIGHT DETECTION ===")]
     [SerializeField] private float trafficLightDetectionRange = 5f;
     [SerializeField] private float trafficLightStoppingDistance = 7f;
+    [Tooltip("Extra distance buffer so NPC stops BEFORE the violation detector collider zone, preventing it from getting trapped inside.")]
+    [SerializeField] private float violationColliderBuffer = 3f;
+    [Tooltip("Maximum seconds to wait at a red light before proceeding anyway. Prevents permanent stuck/disappear if light is broken.")]
+    [SerializeField] private float maxRedLightWaitTime = 20f;
     [SerializeField] private LayerMask trafficLightLayerMask = -1;
     [SerializeField] private bool enableTrafficLightCompliance = true;
 
@@ -238,21 +242,39 @@ public class TrafficVehicle : MonoBehaviour
             return;
         }
 
-        Vector3 rayStart = transform.position + Vector3.up * 1f;
-        Vector3 rayDirection = transform.forward;
-
-        RaycastHit[] hits = Physics.RaycastAll(rayStart, rayDirection, trafficLightDetectionRange, trafficLightLayerMask);
+        // ── Use OverlapSphere instead of a forward raycast.
+        //    Raycast loses the light the moment the car passes the collider face.
+        //    OverlapSphere keeps detecting it while the car is physically nearby. ──
+        Collider[] nearby = Physics.OverlapSphere(
+            transform.position + Vector3.up * 1f,
+            trafficLightDetectionRange,
+            trafficLightLayerMask
+        );
 
         EnhancedTrafficLightViolationDetector closestLight = null;
         float closestDistance = float.MaxValue;
 
-        foreach (RaycastHit hit in hits)
+        foreach (Collider col in nearby)
         {
-            EnhancedTrafficLightViolationDetector detector = hit.collider.GetComponent<EnhancedTrafficLightViolationDetector>();
-            if (detector != null && hit.distance < closestDistance)
+            EnhancedTrafficLightViolationDetector detector = col.GetComponent<EnhancedTrafficLightViolationDetector>();
+            if (detector == null) continue;
+
+            // Only care about lights that are roughly ahead of us (dot > 0)
+            // or that we are currently stopped at (already isStoppedAtRedLight).
+            // This prevents lights BEHIND us from stopping us.
+            Vector3 toLight = (detector.transform.position - transform.position);
+            toLight.y = 0;
+            float dot = Vector3.Dot(transform.forward, toLight.normalized);
+
+            float dist = Vector3.Distance(transform.position, detector.transform.position);
+
+            bool isAhead = dot > -0.2f; // allow slight side/behind tolerance once already stopped
+            bool alreadyAtThisLight = (currentTrafficLight == detector && isStoppedAtRedLight);
+
+            if ((isAhead || alreadyAtThisLight) && dist < closestDistance)
             {
                 closestLight = detector;
-                closestDistance = hit.distance;
+                closestDistance = dist;
             }
         }
 
@@ -277,7 +299,7 @@ public class TrafficVehicle : MonoBehaviour
                     hasReachedStopPosition = false;
 
                     if (showDebugGizmos)
-                        Debug.Log($"[{gameObject.name}] 🚦 Red light detected at {debugTrafficLightID}");
+                        Debug.Log($"[{gameObject.name}] 🚦 Red light detected: {debugTrafficLightID}");
                 }
             }
             else
@@ -321,36 +343,7 @@ public class TrafficVehicle : MonoBehaviour
 
         TrafficLightController.LightState lightState = trafficLightController.currentState;
 
-        if (lightState == TrafficLightController.LightState.Red)
-        {
-            float distanceToStopPosition = Vector3.Distance(transform.position, redLightStopPosition);
-
-            if (!isStoppedAtRedLight)
-            {
-                if (distanceToStopPosition < 2f || debugDistanceToTrafficLight < trafficLightStoppingDistance)
-                {
-                    isStoppedAtRedLight = true;
-                    hasReachedStopPosition = true;
-                    timeEnteredRedLightZone = Time.time;
-
-                    if (showDebugGizmos)
-                        Debug.Log($"[{gameObject.name}] 🛑 STOPPED at RED light {debugTrafficLightID}");
-                }
-            }
-
-            if (isStoppedAtRedLight) return true;
-            if (debugDistanceToTrafficLight < trafficLightStoppingDistance * 1.5f) return true;
-        }
-
-        if (lightState == TrafficLightController.LightState.Yellow)
-        {
-            if (debugDistanceToTrafficLight < trafficLightStoppingDistance * 0.8f)
-            {
-                isStoppedAtRedLight = true;
-                return true;
-            }
-        }
-
+        // ── GREEN: always proceed ──
         if (lightState == TrafficLightController.LightState.Green)
         {
             if (isStoppedAtRedLight && showDebugGizmos)
@@ -359,6 +352,49 @@ public class TrafficVehicle : MonoBehaviour
             isStoppedAtRedLight = false;
             hasReachedStopPosition = false;
             return false;
+        }
+
+        // ── MAX WAIT TIMEOUT: if stuck at red too long, proceed anyway ──
+        // This prevents the car from stopping forever (which caused it to "disappear"
+        // via the stuck detector / fallback teleport). 20 seconds is generous enough
+        // that it only fires if the traffic light is broken or the cycle is very long.
+        if (isStoppedAtRedLight && Time.time - timeEnteredRedLightZone > maxRedLightWaitTime)
+        {
+            if (showDebugGizmos)
+                Debug.LogWarning($"[{gameObject.name}] ⏱️ Red light timeout ({maxRedLightWaitTime}s), proceeding through {debugTrafficLightID}");
+            isStoppedAtRedLight = false;
+            hasReachedStopPosition = false;
+            return false;
+        }
+
+        // ── RED / YELLOW: stop BEFORE the violation collider ──
+        // We stop at (trafficLightStoppingDistance + violationColliderBuffer) from the
+        // detector so the NPC never physically enters the trigger zone.
+        // The violation detector uses IsValidVehicle → VehicleController check (player only),
+        // but physically entering the collider area causes the OverlapSphere detection above
+        // to keep the car indefinitely stopped.
+        float stopDist = trafficLightStoppingDistance + violationColliderBuffer;
+
+        if (lightState == TrafficLightController.LightState.Red || lightState == TrafficLightController.LightState.Yellow)
+        {
+            bool closeEnoughToStop = debugDistanceToTrafficLight < stopDist;
+
+            if (lightState == TrafficLightController.LightState.Yellow && !closeEnoughToStop)
+                return false; // Far enough to safely proceed on yellow
+
+            if (!isStoppedAtRedLight && closeEnoughToStop)
+            {
+                isStoppedAtRedLight = true;
+                hasReachedStopPosition = true;
+                timeEnteredRedLightZone = Time.time;
+
+                if (showDebugGizmos)
+                    Debug.Log($"[{gameObject.name}] 🛑 STOPPED at {lightState} light {debugTrafficLightID} " +
+                              $"({debugDistanceToTrafficLight:F1}m away, buffer={violationColliderBuffer:F1}m)");
+            }
+
+            if (isStoppedAtRedLight) return true;
+            if (closeEnoughToStop) return true;
         }
 
         return false;
@@ -574,11 +610,54 @@ public class TrafficVehicle : MonoBehaviour
         }
 
         int nextNodeID = savedRoutePath[currentPathIndex];
+
+        // ── Line-of-sight check: if the next waypoint is blocked by a building/wall,
+        //    skip ahead in the path until we find a clear one (or re-anchor). ──
+        int safeNodeID = FindNextReachableWaypoint(currentPathIndex);
+        if (safeNodeID != nextNodeID)
+        {
+            Debug.LogWarning($"[{gameObject.name}] ⚠️ Node {nextNodeID} blocked by geometry, skipping to node {safeNodeID}");
+            // Advance index to the safe node
+            currentPathIndex = savedRoutePath.IndexOf(safeNodeID, currentPathIndex);
+            if (currentPathIndex < 0) currentPathIndex = savedRoutePath.Count; // trigger repath
+            nextNodeID = safeNodeID;
+        }
+
         currentNodeID = nextNodeID;
         SetTargetWaypoint(currentNodeID);
 
         float progressPercent = ((float)currentPathIndex / savedRoutePath.Count) * 100f;
         Debug.Log($"[{gameObject.name}] Route Progress: {currentPathIndex}/{savedRoutePath.Count} ({progressPercent:F0}%) → Node {currentNodeID}");
+    }
+
+    /// <summary>
+    /// Starting from startIndex in the saved path, returns the first waypoint node ID
+    /// that is NOT blocked by solid geometry (buildings, walls). 
+    /// Falls back to the original next node if none found within a lookahead window.
+    /// </summary>
+    private int FindNextReachableWaypoint(int startIndex)
+    {
+        const int lookahead = 4; // How many nodes ahead to check
+
+        for (int i = startIndex; i < Mathf.Min(startIndex + lookahead, savedRoutePath.Count); i++)
+        {
+            int nodeID = savedRoutePath[i];
+            if (!navSystem.nodeMap.ContainsKey(nodeID)) continue;
+
+            Vector3 nodePos = navSystem.nodeMap[nodeID].transform.position + Vector3.up * 1f;
+            Vector3 from = transform.position + Vector3.up * 1f;
+            Vector3 dir = (nodePos - from).normalized;
+            float dist = Vector3.Distance(from, nodePos);
+
+            // Use a small sphere cast to better represent car width
+            bool blocked = Physics.SphereCast(from, 0.6f, dir, out _, dist, obstacleLayer);
+
+            if (!blocked)
+                return nodeID; // First unblocked node found
+        }
+
+        // All lookahead nodes blocked — return original next node and let stuck detection handle it
+        return savedRoutePath[startIndex];
     }
 
     private void SetTargetWaypoint(int nodeID)
@@ -597,22 +676,27 @@ public class TrafficVehicle : MonoBehaviour
     private void RecoverFromStuck()
     {
         pathRecalculations++;
+        stuckCounter = 0;
 
         if (pathRecalculations >= MAX_RECALCULATIONS)
         {
-            Debug.LogError($"[{gameObject.name}] Too many recalculations! Picking new destination.");
-            sourceNodeID = currentNodeID;
-            PickNewDestinationAndSaveRoute();
+            Debug.LogError($"[{gameObject.name}] Too many recalculations! Snapping to nearest reachable node.");
+            SnapToNearestReachableNode();
             return;
         }
+
+        // Re-anchor source to our actual current node before recalculating
+        int snappedNode = FindNearestNodeWithLineOfSight();
+        if (snappedNode != -1)
+            currentNodeID = snappedNode;
 
         List<int> newPath = navSystem.FindPath(currentNodeID, destinationNodeID);
 
         if (newPath != null && newPath.Count > 0)
         {
+            sourceNodeID = currentNodeID;
             SaveRouteToVehicle(newPath, destinationNodeID);
-            stuckCounter = 0;
-            Debug.Log($"[{gameObject.name}] ✅ Path successfully recalculated!");
+            Debug.Log($"[{gameObject.name}] ✅ Path recalculated from node {currentNodeID}");
         }
         else
         {
@@ -624,32 +708,89 @@ public class TrafficVehicle : MonoBehaviour
 
     private void FallbackPath()
     {
-        int nearestNode = navSystem.GetClosestNode(transform.position);
+        // Try to find a reachable node and path to it — never teleport
+        int nearestReachable = FindNearestNodeWithLineOfSight();
 
-        if (nearestNode != -1 && nearestNode != sourceNodeID)
+        if (nearestReachable != -1)
         {
-            List<int> path = navSystem.FindPath(sourceNodeID, nearestNode);
+            List<int> path = navSystem.FindPath(sourceNodeID, nearestReachable);
             if (path != null && path.Count > 0)
             {
-                SaveRouteToVehicle(path, nearestNode);
-                Debug.LogWarning($"[{gameObject.name}] Using fallback path to nearest node {nearestNode}");
+                SaveRouteToVehicle(path, nearestReachable);
+                Debug.LogWarning($"[{gameObject.name}] Fallback: routing to nearest reachable node {nearestReachable}");
                 return;
             }
         }
 
-        Debug.LogError($"[{gameObject.name}] EMERGENCY: Teleporting to random node!");
-        int randomNode = navSystem.GetRandomNode();
-
-        if (navSystem.nodeMap.ContainsKey(randomNode))
+        // Last resort: find nearest node and just set it as current without teleporting
+        // The car will drive toward it naturally
+        int nearest = navSystem.GetClosestNode(transform.position);
+        if (nearest != -1 && navSystem.nodeMap.ContainsKey(nearest))
         {
-            Vector3 newPos = navSystem.nodeMap[randomNode].worldPosition;
-            transform.position = newPos;
-            if (!rb.isKinematic) rb.position = newPos;
-
-            sourceNodeID = randomNode;
-            currentNodeID = randomNode;
-            SetTargetWaypoint(randomNode);
+            sourceNodeID = nearest;
+            currentNodeID = nearest;
+            SetTargetWaypoint(nearest);
             PickNewDestinationAndSaveRoute();
+            Debug.LogWarning($"[{gameObject.name}] Fallback: re-anchored to nearest node {nearest} (no teleport)");
+        }
+
+        // NOTE: Emergency teleport REMOVED — it caused cars to fly through buildings.
+        // Worst case the car sits still until a new valid path is found.
+    }
+
+    /// <summary>
+    /// Finds the nearest node that has an unobstructed line-of-sight from this vehicle.
+    /// Used to re-anchor a lost/stuck vehicle to the road graph without teleporting.
+    /// </summary>
+    private int FindNearestNodeWithLineOfSight()
+    {
+        float bestDist = float.MaxValue;
+        int bestNode = -1;
+
+        foreach (var kvp in navSystem.nodeMap)
+        {
+            if (kvp.Value == null) continue;
+
+            Vector3 nodePos = kvp.Value.transform.position;
+            float dist = Vector3.Distance(transform.position, nodePos);
+
+            if (dist > 60f) continue; // Only check nearby nodes
+
+            // Raycast at car height to check for buildings/walls between us and node
+            Vector3 from = transform.position + Vector3.up * 1f;
+            Vector3 to = nodePos + Vector3.up * 1f;
+            Vector3 dir = (to - from).normalized;
+            float checkDist = Vector3.Distance(from, to);
+
+            bool blocked = Physics.Raycast(from, dir, checkDist, obstacleLayer);
+
+            if (!blocked && dist < bestDist)
+            {
+                bestDist = dist;
+                bestNode = kvp.Key;
+            }
+        }
+
+        return bestNode;
+    }
+
+    /// <summary>
+    /// Snaps to nearest reachable node ON the road (no teleport through buildings).
+    /// Only used as absolute last resort — moves along road surface.
+    /// </summary>
+    private void SnapToNearestReachableNode()
+    {
+        int reachable = FindNearestNodeWithLineOfSight();
+        if (reachable == -1)
+            reachable = navSystem.GetClosestNode(transform.position);
+
+        if (reachable != -1 && navSystem.nodeMap.ContainsKey(reachable))
+        {
+            sourceNodeID = reachable;
+            currentNodeID = reachable;
+            pathRecalculations = 0;
+            PickNewDestinationAndSaveRoute();
+            Debug.LogWarning($"[{gameObject.name}] Re-anchored to node {reachable} (no teleport)");
         }
     }
 
@@ -660,12 +801,12 @@ public class TrafficVehicle : MonoBehaviour
     private void MoveVehicle()
     {
         if (targetWaypoint == null) return;
-        if (rb == null || rb.isKinematic) return;  // ← KEY FIX: never touch velocity while kinematic
+        if (rb == null || rb.isKinematic) return;
 
         if (currentSpeed < 0.1f)
         {
-            // Brake to a stop — only set velocity if NOT kinematic
-            rb.linearVelocity = Vector3.Lerp(rb.linearVelocity, Vector3.zero, Time.fixedDeltaTime * 5f);
+            // Just don't move — don't touch linearVelocity while using MovePosition
+            // gravity and friction will handle the rest
             return;
         }
 
@@ -682,22 +823,16 @@ public class TrafficVehicle : MonoBehaviour
         Vector3 forwardMovement = transform.forward * currentSpeed * Time.fixedDeltaTime;
         rb.MovePosition(rb.position + forwardMovement);
 
-        // Lock X/Z rotation
+        // Lock X/Z rotation — let physics/gravity handle Y naturally
         Vector3 euler = transform.eulerAngles;
         euler.x = 0;
         euler.z = 0;
         transform.eulerAngles = euler;
 
-        // Periodic ground snapping
-        if (Time.frameCount % 30 == 0)
-        {
-            Vector3 snappedPos = SnapToGround(transform.position);
-            if (Vector3.Distance(transform.position, snappedPos) < 5f)
-            {
-                transform.position = snappedPos;
-                rb.position = snappedPos;
-            }
-        }
+        // NOTE: Periodic ground snapping REMOVED — it caused bunny-hop bouncing
+        // because teleporting rb.position while MovePosition is also running creates
+        // a sudden position delta that physics resolves as an upward impulse.
+        // Gravity + road collider keeps the car grounded naturally.
     }
 
     private bool DetectObstacle()
