@@ -46,6 +46,12 @@ public class CentralizedNavigationSystem : MonoBehaviour
     [SerializeField] private bool showDebugGizmos = true;
     [SerializeField] private float vehicleSpacing = 15f;
 
+    [Header("=== SPAWN GROUNDING ===")]
+    [Tooltip("Layer(s) considered as road/ground for spawn raycast. If nothing assigned, hits everything.")]
+    [SerializeField] private LayerMask groundLayer = ~0;
+    [Tooltip("Extra upward offset added after ground snap (tweak if cars still float or clip). Usually 0.")]
+    [SerializeField] private float spawnHeightOffset = 0f;
+
     [Header("=== TRAFFIC CHAINS (DEPRECATED - NOT USED IN DESTINATION MODE) ===")]
     [Tooltip("Legacy chain system - not used with destination-based traffic")]
     public List<TrafficWaypointChain> trafficChains = new List<TrafficWaypointChain>();
@@ -375,6 +381,30 @@ public class CentralizedNavigationSystem : MonoBehaviour
     // TRAFFIC SPAWNING (DESTINATION-BASED)
     // ========================================
 
+    /// <summary>
+    /// Returns how far the prefab's lowest collider point is below its pivot.
+    /// The object must be ACTIVE in the scene for bounds to be valid — we spawn
+    /// it far away, read bounds, then teleport it to the real position.
+    /// </summary>
+    private float GetLiveBottomOffset(GameObject vehicleObj)
+    {
+        float lowestLocal = 0f;
+        bool found = false;
+        foreach (Collider col in vehicleObj.GetComponentsInChildren<Collider>(true))
+        {
+            if (col.isTrigger) continue;
+            float localBottom = col.bounds.min.y - vehicleObj.transform.position.y;
+            if (!found || localBottom < lowestLocal)
+            {
+                lowestLocal = localBottom;
+                found = true;
+            }
+        }
+        // lowestLocal is negative when collider extends below pivot.
+        // Return its absolute value so we can ADD it to lift the car up.
+        return found ? Mathf.Abs(lowestLocal) : 0f;
+    }
+
     private void SpawnTrafficVehicles()
     {
         ClearAllTraffic();
@@ -385,7 +415,6 @@ public class CentralizedNavigationSystem : MonoBehaviour
             return;
         }
 
-        // Collect prefabs
         List<GameObject> prefabs = new List<GameObject>();
         if (npcVehiclePrefab != null) prefabs.Add(npcVehiclePrefab);
         prefabs.AddRange(npcVariants.Where(v => v != null));
@@ -396,16 +425,15 @@ public class CentralizedNavigationSystem : MonoBehaviour
             return;
         }
 
-        // Get all available spawn nodes
         List<int> availableNodeIDs = nodeMap.Keys.ToList();
-        
-        // Shuffle for random distribution
+
+        // Shuffle
         for (int i = 0; i < availableNodeIDs.Count; i++)
         {
             int r = UnityEngine.Random.Range(i, availableNodeIDs.Count);
-            int temp = availableNodeIDs[i];
+            int tmp = availableNodeIDs[i];
             availableNodeIDs[i] = availableNodeIDs[r];
-            availableNodeIDs[r] = temp;
+            availableNodeIDs[r] = tmp;
         }
 
         List<Vector3> usedPositions = new List<Vector3>();
@@ -416,37 +444,36 @@ public class CentralizedNavigationSystem : MonoBehaviour
         foreach (int nodeID in availableNodeIDs)
         {
             if (spawned >= totalTrafficVehicles) break;
-            
             if (!nodeMap.ContainsKey(nodeID)) continue;
-            
-            Vector3 spawnPosition = nodeMap[nodeID].worldPosition;
-            
-            // Check spacing to avoid overlap
+
+            Vector3 nodePos = nodeMap[nodeID].transform.position;
+
+            // Spacing check
             bool tooClose = false;
-            foreach (Vector3 usedPos in usedPositions)
+            foreach (Vector3 used in usedPositions)
             {
-                if (Vector3.Distance(spawnPosition, usedPos) < vehicleSpacing)
-                {
-                    tooClose = true;
-                    break;
-                }
+                if (Vector3.Distance(nodePos, used) < vehicleSpacing) { tooClose = true; break; }
             }
-            
             if (tooClose) continue;
-            
-            // Select random prefab
+
             GameObject prefab = prefabs[UnityEngine.Random.Range(0, prefabs.Count)];
-            GameObject vehicleObj = Instantiate(prefab);
+            Quaternion spawnRot = nodeMap[nodeID].transform.rotation;
+
+            // ── Step 1: Instantiate far below the world so it doesn't visually
+            //            pop in at the wrong place while we measure bounds. ──
+            Vector3 measurePos = new Vector3(nodePos.x, -5000f, nodePos.z);
+            GameObject vehicleObj = Instantiate(prefab, measurePos, spawnRot);
             vehicleObj.name = $"Traffic_{spawned}";
-            vehicleObj.transform.position = spawnPosition;
-            vehicleObj.transform.rotation = nodeMap[nodeID].transform.rotation;
-            
-            // Setup TrafficVehicle component
-            TrafficVehicle traffic = vehicleObj.GetComponent<TrafficVehicle>();
-            if (traffic == null)
-                traffic = vehicleObj.AddComponent<TrafficVehicle>();
-            
-            // Setup Rigidbody
+
+            // ── Step 2: With the object ACTIVE we can read live collider bounds.
+            //            bottomOffset = distance from pivot to the lowest collider face. ──
+            float bottomOffset = GetLiveBottomOffset(vehicleObj);
+
+            // ── Step 3: Final Y = node Y + bottomOffset + any designer tweak.
+            //            This places the car's wheel-bottom exactly at road level. ──
+            Vector3 spawnPosition = new Vector3(nodePos.x, nodePos.y + bottomOffset + spawnHeightOffset, nodePos.z);
+
+            // Setup Rigidbody BEFORE teleporting
             Rigidbody rb = vehicleObj.GetComponent<Rigidbody>();
             if (rb == null)
             {
@@ -457,30 +484,50 @@ public class CentralizedNavigationSystem : MonoBehaviour
                 rb.interpolation = RigidbodyInterpolation.Interpolate;
                 rb.constraints = RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ;
             }
-            
+
+            // Hold kinematic so physics can't move it during teleport
+            rb.isKinematic = true;
+
+            // ── Step 4: Teleport to final grounded position ──
+            vehicleObj.transform.position = spawnPosition;
             rb.position = spawnPosition;
-            
-            // Randomize speed slightly
+            rb.rotation = spawnRot;
+
+            // Setup TrafficVehicle
+            TrafficVehicle traffic = vehicleObj.GetComponent<TrafficVehicle>();
+            if (traffic == null)
+                traffic = vehicleObj.AddComponent<TrafficVehicle>();
+
             float speed = vehicleSpeed * UnityEngine.Random.Range(0.85f, 1.15f);
-            
-            // Initialize with destination-based navigation
-            traffic.Initialize(
-                this,
-                nodeID,
-                speed,
-                stoppingDistance,
-                detectionRange,
-                obstacleLayer
-            );
-            
+            traffic.Initialize(this, nodeID, speed, stoppingDistance, detectionRange, obstacleLayer);
+
+            // Release kinematic after physics settles
+            StartCoroutine(ReleaseKinematicNextFrame(rb));
+
             activeVehicles.Add(traffic);
             usedPositions.Add(spawnPosition);
             spawned++;
-            
-            Debug.Log($"[Traffic] Spawned vehicle {spawned} at Node {nodeID}");
+
+            Debug.Log($"[Traffic] Spawned vehicle {spawned} at Node {nodeID} | nodeY={nodePos.y:F2} bottomOffset={bottomOffset:F2} finalY={spawnPosition.y:F2}");
         }
 
         Debug.Log($"[Traffic] ========== SPAWNED {spawned} VEHICLES ==========");
+    }
+
+    /// <summary>
+    /// Releases kinematic after 2 fixed frames so the vehicle settles onto the
+    /// road surface without being launched by the first physics tick.
+    /// </summary>
+    private IEnumerator ReleaseKinematicNextFrame(Rigidbody rb)
+    {
+        yield return new WaitForFixedUpdate();
+        yield return new WaitForFixedUpdate();
+        if (rb != null)
+        {
+            rb.isKinematic = false;  // isKinematic = false FIRST, then set velocity
+            rb.linearVelocity = Vector3.zero;
+            rb.angularVelocity = Vector3.zero;
+        }
     }
 
     [ContextMenu("Spawn Traffic Now")]
