@@ -13,6 +13,7 @@ public class AnimatorHelper : MonoBehaviour
     // Generic methods for UnityEvents
     public void SetBoolTrue(string parameterName)
     {
+        print("entered");
         animator.SetBool(parameterName, true);
     }
 
