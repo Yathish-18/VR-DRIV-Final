@@ -310,11 +310,25 @@ public class TrackSelectionManager : MonoBehaviour
     {
         if (gameDatabase == null) return;
         var currentTrack = gameDatabase.GetTrack(currentTrackIndex);
+        var currentTime = gameDatabase.GetTimeOfDay(selectedTimeIndex); // Get the selected time
 
-        if (currentTrack != null && !string.IsNullOrEmpty(currentTrack.sceneName))
+        if (currentTrack != null && !string.IsNullOrEmpty(currentTrack.sceneName))
         {
             PrepareGameSessionData();
-            SceneManager.LoadScene(currentTrack.sceneName);
+
+            // Default to the scene name saved in the TrackDataSO
+            string sceneToLoad = currentTrack.sceneName;
+
+            // --- ADDED LOGIC FOR CITY NIGHT OVERRIDE ---
+            // Make sure "City" and "Night" exactly match the names you typed in your ScriptableObjects!
+            if (currentTrack.trackName == "City" && currentTime.timeName == "Night")
+            {
+                // Replace this with the exact name of your City Night scene in the Build Settings
+                sceneToLoad = "CITY";
+            }
+            // -------------------------------------------
+
+            SceneManager.LoadScene(sceneToLoad);
         }
         else
         {
