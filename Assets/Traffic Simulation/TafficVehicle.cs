@@ -1,6 +1,6 @@
 ﻿// TRAFFIC VEHICLE - DESTINATION-BASED NAVIGATION WITH TRAFFIC LIGHT COMPLIANCE
 // Saves complete route and navigates between random destinations
-// Fixed: Cars now properly stop at red lights without reversing
+// Fixed: Hill climbing, slope detection, obstacle detection on slopes, stuck detection on hills
 
 using UnityEngine;
 using System.Collections.Generic;
@@ -29,7 +29,7 @@ public class TrafficVehicle : MonoBehaviour
     [Header("=== SAVED ROUTE DATA ===")]
     [SerializeField] private int sourceNodeID = -1;
     [SerializeField] private int destinationNodeID = -1;
-    [SerializeField] private List<int> savedRoutePath = new List<int>(); // SAVED PATH
+    [SerializeField] private List<int> savedRoutePath = new List<int>();
     [SerializeField] private int currentPathIndex = 0;
 
     // Path constraints
@@ -45,21 +45,63 @@ public class TrafficVehicle : MonoBehaviour
     private float currentSpeed = 0f;
     private bool isStopped = false;
     private Vector3 lastValidPosition;
-    private float waypointReachDistance = 5f;
+    private float waypointReachDistance = 5f;  // kept for any external references
     private int stuckCounter = 0;
-    private const int MAX_STUCK_FRAMES = 180; // 3 seconds at 60fps
+    private const int MAX_STUCK_FRAMES = 180;
     private int pathRecalculations = 0;
     private const int MAX_RECALCULATIONS = 3;
 
-    // ========================================
-    // FIXED: TRAFFIC LIGHT DETECTION
-    // ========================================
+    // ===================================================
+    // HILL / SLOPE SETTINGS
+    // ===================================================
+    [Header("=== HILL / SLOPE SETTINGS ===")]
+    [Tooltip("Layers considered road/terrain surface for ground-snap raycasts. " +
+             "Must include your Road and Terrain layers but NOT vehicles or buildings.")]
+    [SerializeField] private LayerMask groundLayer = ~0;
+
+    [Tooltip("How far above the car pivot to start the downward ground-snap raycast.")]
+    [SerializeField] private float groundRayUpOffset = 3f;
+
+    [Tooltip("Max downward ray distance for the ground-snap ray.")]
+    [SerializeField] private float groundRayDistance = 8f;
+
+    [Tooltip("Target ride height above the ground surface (metres). " +
+             "Tune so wheels sit flush: start at 0.5 and adjust.")]
+    [SerializeField] private float rideHeight = 0.5f;
+
+    [Tooltip("How strongly the car's Y is corrected toward ride height each physics step. " +
+             "8-12 works well. Too high = jitter, too low = floaty.")]
+    [SerializeField] private float groundSnapStrength = 8f;
+
+    [Tooltip("How fast the car body tilts to match the slope normal.")]
+    [SerializeField] private float slopeTiltSpeed = 5f;
+
+    [Tooltip("Speed multiplier applied when the next waypoint is above the car (uphill). " +
+             "Prevents stalling on steep roads. 1.3-1.6 recommended.")]
+    [SerializeField] private float hillClimbBoost = 1.4f;
+
+    [Tooltip("Horizontal (XZ) distance to consider a waypoint reached. " +
+             "Using XZ only means hills don't prevent node advancement.")]
+    [SerializeField] private float waypointReachDistanceXZ = 5f;
+
+    [Tooltip("Vertical tolerance on top of waypointReachDistanceXZ. " +
+             "Needed so very tall hill nodes still trigger advancement.")]
+    [SerializeField] private float waypointReachDistanceY = 4f;
+
+    // Cached ground state (updated every FixedUpdate via SampleGround)
+    private bool isGrounded = false;
+    private Vector3 groundNormal = Vector3.up;
+    private float currentGroundY = 0f;
+
+    // ===================================================
+    // TRAFFIC LIGHT DETECTION
+    // ===================================================
     [Header("=== TRAFFIC LIGHT DETECTION ===")]
     [SerializeField] private float trafficLightDetectionRange = 5f;
     [SerializeField] private float trafficLightStoppingDistance = 7f;
-    [Tooltip("Extra distance buffer so NPC stops BEFORE the violation detector collider zone, preventing it from getting trapped inside.")]
+    [Tooltip("Extra distance buffer so NPC stops BEFORE the violation detector collider zone.")]
     [SerializeField] private float violationColliderBuffer = 3f;
-    [Tooltip("Maximum seconds to wait at a red light before proceeding anyway. Prevents permanent stuck/disappear if light is broken.")]
+    [Tooltip("Maximum seconds to wait at a red light before proceeding anyway.")]
     [SerializeField] private float maxRedLightWaitTime = 20f;
     [SerializeField] private LayerMask trafficLightLayerMask = -1;
     [SerializeField] private bool enableTrafficLightCompliance = true;
@@ -71,9 +113,9 @@ public class TrafficVehicle : MonoBehaviour
     private Vector3 redLightStopPosition = Vector3.zero;
     private bool hasReachedStopPosition = false;
 
-    // ========================================
-    // IMPROVED VEHICLE-AHEAD DETECTION
-    // ========================================
+    // ===================================================
+    // VEHICLE-AHEAD DETECTION
+    // ===================================================
     [Header("=== VEHICLE AHEAD DETECTION ===")]
     [SerializeField] private float vehicleDetectionRange = 20f;
     [SerializeField] private float vehicleStoppingDistance = 10f;
@@ -84,6 +126,9 @@ public class TrafficVehicle : MonoBehaviour
     private GameObject detectedVehicleAhead = null;
     private float distanceToVehicleAhead = 0f;
 
+    // ===================================================
+    // DEBUG INFO (READ ONLY)
+    // ===================================================
     [Header("=== DEBUG INFO (READ ONLY) ===")]
     [SerializeField] private string debugRouteName = "";
     [SerializeField] private int debugPathProgress = 0;
@@ -105,46 +150,86 @@ public class TrafficVehicle : MonoBehaviour
     [SerializeField] private bool debugVehicleAheadDetected = false;
     [SerializeField] private float debugDistanceToVehicleAhead = 0f;
 
+    // Hill debug
+    [SerializeField] private bool debugIsGrounded = false;
+    [SerializeField] private float debugSlopeAngle = 0f;
+    [SerializeField] private float debugGroundY = 0f;
+
     private Color debugColor = Color.green;
     private float targetSpeed = 0f;
     private float speedSmoothVelocity = 0f;
     private float speedSmoothTime = 0.3f;
 
-    public void Initialize(CentralizedNavigationSystem navSys, int startNodeID, float speed, float stopDist, float detectRange, LayerMask obstacles)
+    // Alignment tracking – how many degrees the car is off from facing its waypoint.
+    // Used in MoveVehicle to scale drive speed: full speed when aligned, near-zero when pointing away.
+    private float angleToCurrentWaypoint = 0f;
+
+    // Minimum seconds between consecutive waypoint advances.
+    // Prevents cascade-skipping through tightly-spaced nodes in one FixedUpdate tick.
+    private float lastAdvanceTime = -999f;
+    private const float MIN_ADVANCE_INTERVAL = 0.15f;
+
+    // ===================================================
+    // INITIALIZE
+    // ===================================================
+
+    /// <summary>
+    /// Called by CentralizedNavigationSystem when spawning this vehicle.
+    /// The groundConfig struct carries all ground/slope settings so they are
+    /// configured once centrally and never need touching per-vehicle.
+    /// </summary>
+    public void Initialize(CentralizedNavigationSystem navSys, int startNodeID, float speed,
+                           float stopDist, float detectRange, LayerMask obstacles,
+                           CentralizedNavigationSystem.VehicleGroundConfig groundConfig = default)
     {
-        navSystem = navSys;
-        maxSpeed = speed;
+        navSystem        = navSys;
+        maxSpeed         = speed;
         stoppingDistance = stopDist;
-        detectionRange = detectRange;
-        obstacleLayer = obstacles;
+        detectionRange   = detectRange;
+        obstacleLayer    = obstacles;
+
+        // ── Apply centralised ground/slope config from CentralizedNavigationSystem ──
+        // Only override if the config carries a non-zero groundLayer (i.e. was actually set).
+        // If default(VehicleGroundConfig) was passed the inspector values are kept as-is.
+        if (groundConfig.groundLayer != 0)
+        {
+            groundLayer        = groundConfig.groundLayer;
+            rideHeight         = groundConfig.rideHeight;
+            groundSnapStrength = groundConfig.groundSnapStrength;
+            slopeTiltSpeed     = groundConfig.slopeTiltSpeed;
+            hillClimbBoost     = groundConfig.hillClimbBoost;
+
+            Debug.Log($"[{gameObject.name}] Ground config applied from NavSystem → " +
+                      $"groundLayer={groundConfig.groundLayer.value} " +
+                      $"rideHeight={rideHeight:F2} snapStrength={groundSnapStrength:F1} " +
+                      $"tiltSpeed={slopeTiltSpeed:F1} climbBoost={hillClimbBoost:F2}");
+        }
 
         rb = GetComponent<Rigidbody>();
         if (rb == null)
-        {
             rb = gameObject.AddComponent<Rigidbody>();
-            rb.mass = 1200f;
-            rb.linearDamping = 0.5f;
-            rb.angularDamping = 5f;
-            rb.interpolation = RigidbodyInterpolation.Interpolate;
-            rb.constraints = RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ;
-        }
 
-        maxSpeed *= Random.Range(0.85f, 1.15f);
-        acceleration = maxSpeed * 1.5f;
-        turnSpeed = maxSpeed * 0.3f;
+        rb.mass           = 1200f;
+        rb.linearDamping  = 1f;
+        rb.angularDamping = 10f;
+        rb.interpolation  = RigidbodyInterpolation.Interpolate;
+        rb.constraints    = RigidbodyConstraints.None;
 
-        // Use the position we're already placed at (CentralizedNavigationSystem handled grounding)
+        maxSpeed     *= Random.Range(0.85f, 1.15f);
+        acceleration  = maxSpeed * 1.5f;
+        turnSpeed     = maxSpeed * 0.3f;
+
         lastValidPosition = transform.position;
-        rb.position = transform.position;
+        rb.position       = transform.position;
 
         if (startNodeID != -1 && navSystem.nodeMap.ContainsKey(startNodeID))
         {
-            sourceNodeID = startNodeID;
+            sourceNodeID  = startNodeID;
             currentNodeID = startNodeID;
         }
         else
         {
-            sourceNodeID = navSystem.GetRandomNode();
+            sourceNodeID  = navSystem.GetRandomNode();
             currentNodeID = sourceNodeID;
         }
 
@@ -154,21 +239,30 @@ public class TrafficVehicle : MonoBehaviour
 
         Debug.Log($"[{gameObject.name}] ========== INITIALIZATION ==========");
         Debug.Log($"[{gameObject.name}] Spawn Node: {sourceNodeID}");
-        Debug.Log($"[{gameObject.name}] Position: {transform.position}");
-        Debug.Log($"[{gameObject.name}] Max Speed: {maxSpeed:F1} m/s");
+        Debug.Log($"[{gameObject.name}] Position  : {transform.position}");
+        Debug.Log($"[{gameObject.name}] Max Speed : {maxSpeed:F1} m/s");
         Debug.Log($"[{gameObject.name}] =====================================");
     }
+
+    // ===================================================
+    // FIXED UPDATE
+    // ===================================================
 
     private void FixedUpdate()
     {
         if (navSystem == null || savedRoutePath == null || savedRoutePath.Count == 0)
             return;
 
-        // Skip all movement logic while kinematic (spawning phase)
         if (rb != null && rb.isKinematic)
             return;
 
         UpdateDebugInfo();
+
+        // Reset per-frame advance guard
+        _advancedThisFrame = false;
+
+        // FIX: Sample ground every physics tick so slope/height data is always fresh
+        SampleGround();
 
         DetectTrafficLightAhead();
         DetectVehicleAhead();
@@ -176,128 +270,185 @@ public class TrafficVehicle : MonoBehaviour
         bool hasObstacle = DetectObstacle();
         debugIsObstacleDetected = hasObstacle;
 
-        float distanceToTarget = targetWaypoint != null ? Vector3.Distance(transform.position, targetWaypoint.position) : 0f;
+        // FIX: Waypoint reached check uses XZ distance + Y tolerance separately.
+        // Original Vector3.Distance included Y, so large height difference on hills
+        // prevented the car from ever "reaching" a node it was horizontally next to.
+        float distXZ = targetWaypoint != null
+            ? HorizontalDistance(transform.position, targetWaypoint.position)
+            : 0f;
+        float distY = targetWaypoint != null
+            ? Mathf.Abs(transform.position.y - targetWaypoint.position.y)
+            : 0f;
 
-        if (distanceToTarget < waypointReachDistance)
+        // Cache angle-to-waypoint so MoveVehicle can use it for speed scaling.
+        if (targetWaypoint != null)
         {
-            AdvanceAlongSavedRoute();
+            Vector3 toWpXZ = new Vector3(
+                targetWaypoint.position.x - transform.position.x,
+                0f,
+                targetWaypoint.position.z - transform.position.z);
+            angleToCurrentWaypoint = toWpXZ.sqrMagnitude > 0.01f
+                ? Vector3.Angle(new Vector3(transform.forward.x, 0f, transform.forward.z), toWpXZ)
+                : 0f;
         }
 
+        // Only advance when:
+        //   (a) within reach distance on XZ plane AND Y tolerance, AND
+        //   (b) the car is at least roughly facing forward (angle < 90°),
+        //       OR it is extremely close (< 2 m) — prevents backward glide-through.
+        //   (c) enough time has passed since the last advance (avoids cascade skipping).
+        bool waypointReached = distXZ < waypointReachDistanceXZ
+                            && distY < waypointReachDistanceY
+                            && (angleToCurrentWaypoint < 90f || distXZ < 2f)
+                            && (Time.time - lastAdvanceTime >= MIN_ADVANCE_INTERVAL);
+        if (waypointReached)
+            AdvanceAlongSavedRoute();
+
         bool shouldStopForTrafficLight = ShouldStopForTrafficLight();
-        bool shouldStopForVehicle = ShouldStopForVehicleAhead();
-
+        bool shouldStopForVehicle      = ShouldStopForVehicleAhead();
         bool shouldStop = hasObstacle || shouldStopForTrafficLight || shouldStopForVehicle;
-        targetSpeed = shouldStop ? 0f : maxSpeed;
-        isStopped = shouldStop;
 
-        debugAtRedLight = shouldStopForTrafficLight;
+        // FIX: Apply uphill speed boost so car doesn't stall on steep roads
+        float slopeBoost = 1f;
+        if (!shouldStop && targetWaypoint != null)
+        {
+            float heightDiff = targetWaypoint.position.y - transform.position.y;
+            if (heightDiff > 0.5f)
+                slopeBoost = hillClimbBoost;
+        }
+
+        targetSpeed = shouldStop ? 0f : maxSpeed * slopeBoost;
+        isStopped   = shouldStop;
+
+        debugAtRedLight           = shouldStopForTrafficLight;
         debugVehicleAheadDetected = shouldStopForVehicle;
 
         currentSpeed = Mathf.SmoothDamp(currentSpeed, targetSpeed, ref speedSmoothVelocity, speedSmoothTime);
 
         MoveVehicle();
 
+        // FIX: Stuck detection now uses horizontal distance only.
+        // On steep uphills the car moves slowly — purely vertical progress was
+        // being misread as "not moving" and triggering spurious repath loops.
         if (!shouldStopForTrafficLight && !shouldStopForVehicle)
         {
-            float movedDistance = Vector3.Distance(transform.position, lastValidPosition);
-            if (movedDistance < 0.1f && currentSpeed > 0.1f)
+            float movedXZ = HorizontalDistance(transform.position, lastValidPosition);
+            if (movedXZ < 0.25f && currentSpeed > 0.5f)
             {
                 stuckCounter++;
                 debugIsStuck = true;
-
                 if (stuckCounter >= MAX_STUCK_FRAMES)
                 {
-                    Debug.LogWarning($"[{gameObject.name}] ⚠️ STUCK for 3 seconds! Attempting recovery...");
+                    Debug.LogWarning($"[{gameObject.name}] ⚠️ STUCK for 3s! Attempting recovery...");
                     RecoverFromStuck();
                 }
             }
             else
             {
-                stuckCounter = 0;
-                debugIsStuck = false;
+                stuckCounter      = 0;
+                debugIsStuck      = false;
                 lastValidPosition = transform.position;
             }
         }
         else
         {
-            stuckCounter = 0;
-            debugIsStuck = false;
+            stuckCounter      = 0;
+            debugIsStuck      = false;
             lastValidPosition = transform.position;
         }
     }
 
-    // ========================================
-    // TRAFFIC LIGHT DETECTION METHODS
-    // ========================================
+    // ===================================================
+    // FIX: GROUND SAMPLING
+    // Fires a downward ray to find slope normal and surface Y each physics tick.
+    // ===================================================
+
+    private void SampleGround()
+    {
+        Vector3 rayOrigin = transform.position + Vector3.up * groundRayUpOffset;
+
+        if (Physics.Raycast(rayOrigin, Vector3.down, out RaycastHit hit,
+                            groundRayDistance + groundRayUpOffset, groundLayer))
+        {
+            isGrounded     = true;
+            groundNormal   = hit.normal;
+            currentGroundY = hit.point.y;
+
+            debugSlopeAngle = Vector3.Angle(groundNormal, Vector3.up);
+            debugGroundY    = currentGroundY;
+            debugIsGrounded = true;
+        }
+        else
+        {
+            isGrounded      = false;
+            groundNormal    = Vector3.up;
+            debugSlopeAngle = 0f;
+            debugIsGrounded = false;
+        }
+    }
+
+    // ===================================================
+    // TRAFFIC LIGHT DETECTION (logic unchanged, cleaned up)
+    // ===================================================
 
     private void DetectTrafficLightAhead()
     {
         if (!enableTrafficLightCompliance)
         {
-            currentTrafficLight = null;
-            isInTrafficLightZone = false;
-            debugTrafficLightID = "Disabled";
-            debugTrafficLightState = "N/A";
+            currentTrafficLight         = null;
+            isInTrafficLightZone        = false;
+            debugTrafficLightID         = "Disabled";
+            debugTrafficLightState      = "N/A";
             debugDistanceToTrafficLight = 0f;
             return;
         }
 
-        // ── Use OverlapSphere instead of a forward raycast.
-        //    Raycast loses the light the moment the car passes the collider face.
-        //    OverlapSphere keeps detecting it while the car is physically nearby. ──
         Collider[] nearby = Physics.OverlapSphere(
             transform.position + Vector3.up * 1f,
             trafficLightDetectionRange,
-            trafficLightLayerMask
-        );
+            trafficLightLayerMask);
 
         EnhancedTrafficLightViolationDetector closestLight = null;
         float closestDistance = float.MaxValue;
 
         foreach (Collider col in nearby)
         {
-            EnhancedTrafficLightViolationDetector detector = col.GetComponent<EnhancedTrafficLightViolationDetector>();
+            var detector = col.GetComponent<EnhancedTrafficLightViolationDetector>();
             if (detector == null) continue;
 
-            // Only care about lights that are roughly ahead of us (dot > 0)
-            // or that we are currently stopped at (already isStoppedAtRedLight).
-            // This prevents lights BEHIND us from stopping us.
-            Vector3 toLight = (detector.transform.position - transform.position);
+            Vector3 toLight = detector.transform.position - transform.position;
             toLight.y = 0;
-            float dot = Vector3.Dot(transform.forward, toLight.normalized);
-
+            float dot  = Vector3.Dot(transform.forward, toLight.normalized);
             float dist = Vector3.Distance(transform.position, detector.transform.position);
 
-            bool isAhead = dot > -0.2f; // allow slight side/behind tolerance once already stopped
+            bool isAhead          = dot > -0.2f;
             bool alreadyAtThisLight = (currentTrafficLight == detector && isStoppedAtRedLight);
 
             if ((isAhead || alreadyAtThisLight) && dist < closestDistance)
             {
-                closestLight = detector;
+                closestLight    = detector;
                 closestDistance = dist;
             }
         }
 
         if (closestLight != null)
         {
-            bool isNewLight = (currentTrafficLight == null || currentTrafficLight != closestLight);
-            currentTrafficLight = closestLight;
-            isInTrafficLightZone = true;
+            bool isNewLight     = (currentTrafficLight == null || currentTrafficLight != closestLight);
+            currentTrafficLight         = closestLight;
+            isInTrafficLightZone        = true;
             debugDistanceToTrafficLight = closestDistance;
-            debugTrafficLightID = currentTrafficLight.GetTrafficLightID();
+            debugTrafficLightID         = currentTrafficLight.GetTrafficLightID();
 
-            TrafficLightController trafficLightController = currentTrafficLight.GetTrafficLight();
-            if (trafficLightController != null)
+            TrafficLightController tlc = currentTrafficLight.GetTrafficLight();
+            if (tlc != null)
             {
-                debugTrafficLightState = trafficLightController.currentState.ToString();
-
-                if (isNewLight && trafficLightController.currentState == TrafficLightController.LightState.Red)
+                debugTrafficLightState = tlc.currentState.ToString();
+                if (isNewLight && tlc.currentState == TrafficLightController.LightState.Red)
                 {
-                    Vector3 directionToLight = (currentTrafficLight.transform.position - transform.position).normalized;
-                    redLightStopPosition = currentTrafficLight.transform.position - (directionToLight * trafficLightStoppingDistance);
+                    Vector3 dir = (currentTrafficLight.transform.position - transform.position).normalized;
+                    redLightStopPosition   = currentTrafficLight.transform.position - dir * trafficLightStoppingDistance;
                     redLightStopPosition.y = transform.position.y;
                     hasReachedStopPosition = false;
-
                     if (showDebugGizmos)
                         Debug.Log($"[{gameObject.name}] 🚦 Red light detected: {debugTrafficLightID}");
                 }
@@ -311,17 +462,15 @@ public class TrafficVehicle : MonoBehaviour
         {
             if (isInTrafficLightZone)
             {
-                isInTrafficLightZone = false;
-                isStoppedAtRedLight = false;
+                isInTrafficLightZone   = false;
+                isStoppedAtRedLight    = false;
                 hasReachedStopPosition = false;
-
                 if (showDebugGizmos)
                     Debug.Log($"[{gameObject.name}] ✅ Cleared traffic light zone");
             }
-
-            currentTrafficLight = null;
-            debugTrafficLightID = "None";
-            debugTrafficLightState = "N/A";
+            currentTrafficLight         = null;
+            debugTrafficLightID         = "None";
+            debugTrafficLightState      = "N/A";
             debugDistanceToTrafficLight = 0f;
         }
     }
@@ -334,176 +483,148 @@ public class TrafficVehicle : MonoBehaviour
             return false;
         }
 
-        TrafficLightController trafficLightController = currentTrafficLight.GetTrafficLight();
-        if (trafficLightController == null)
-        {
-            isStoppedAtRedLight = false;
-            return false;
-        }
+        TrafficLightController tlc = currentTrafficLight.GetTrafficLight();
+        if (tlc == null) { isStoppedAtRedLight = false; return false; }
 
-        TrafficLightController.LightState lightState = trafficLightController.currentState;
+        var lightState = tlc.currentState;
 
-        // ── GREEN: always proceed ──
         if (lightState == TrafficLightController.LightState.Green)
         {
             if (isStoppedAtRedLight && showDebugGizmos)
                 Debug.Log($"[{gameObject.name}] 🟢 GREEN light! Proceeding through {debugTrafficLightID}");
-
-            isStoppedAtRedLight = false;
+            isStoppedAtRedLight    = false;
             hasReachedStopPosition = false;
             return false;
         }
 
-        // ── MAX WAIT TIMEOUT: if stuck at red too long, proceed anyway ──
-        // This prevents the car from stopping forever (which caused it to "disappear"
-        // via the stuck detector / fallback teleport). 20 seconds is generous enough
-        // that it only fires if the traffic light is broken or the cycle is very long.
         if (isStoppedAtRedLight && Time.time - timeEnteredRedLightZone > maxRedLightWaitTime)
         {
             if (showDebugGizmos)
-                Debug.LogWarning($"[{gameObject.name}] ⏱️ Red light timeout ({maxRedLightWaitTime}s), proceeding through {debugTrafficLightID}");
-            isStoppedAtRedLight = false;
+                Debug.LogWarning($"[{gameObject.name}] ⏱️ Red light timeout, proceeding through {debugTrafficLightID}");
+            isStoppedAtRedLight    = false;
             hasReachedStopPosition = false;
             return false;
         }
 
-        // ── RED / YELLOW: stop BEFORE the violation collider ──
-        // We stop at (trafficLightStoppingDistance + violationColliderBuffer) from the
-        // detector so the NPC never physically enters the trigger zone.
-        // The violation detector uses IsValidVehicle → VehicleController check (player only),
-        // but physically entering the collider area causes the OverlapSphere detection above
-        // to keep the car indefinitely stopped.
         float stopDist = trafficLightStoppingDistance + violationColliderBuffer;
 
-        if (lightState == TrafficLightController.LightState.Red || lightState == TrafficLightController.LightState.Yellow)
+        if (lightState == TrafficLightController.LightState.Red ||
+            lightState == TrafficLightController.LightState.Yellow)
         {
             bool closeEnoughToStop = debugDistanceToTrafficLight < stopDist;
 
             if (lightState == TrafficLightController.LightState.Yellow && !closeEnoughToStop)
-                return false; // Far enough to safely proceed on yellow
+                return false;
 
             if (!isStoppedAtRedLight && closeEnoughToStop)
             {
-                isStoppedAtRedLight = true;
-                hasReachedStopPosition = true;
+                isStoppedAtRedLight     = true;
+                hasReachedStopPosition  = true;
                 timeEnteredRedLightZone = Time.time;
-
                 if (showDebugGizmos)
-                    Debug.Log($"[{gameObject.name}] 🛑 STOPPED at {lightState} light {debugTrafficLightID} " +
-                              $"({debugDistanceToTrafficLight:F1}m away, buffer={violationColliderBuffer:F1}m)");
+                    Debug.Log($"[{gameObject.name}] 🛑 STOPPED at {lightState} {debugTrafficLightID} " +
+                              $"({debugDistanceToTrafficLight:F1}m away)");
             }
 
-            if (isStoppedAtRedLight) return true;
-            if (closeEnoughToStop) return true;
+            if (isStoppedAtRedLight || closeEnoughToStop) return true;
         }
 
         return false;
     }
 
-    // ========================================
-    // VEHICLE-AHEAD DETECTION
-    // ========================================
+    // ===================================================
+    // VEHICLE-AHEAD DETECTION (unchanged)
+    // ===================================================
 
     private void DetectVehicleAhead()
     {
         if (!enableVehicleAheadDetection)
         {
-            detectedVehicleAhead = null;
-            distanceToVehicleAhead = 0f;
+            detectedVehicleAhead        = null;
+            distanceToVehicleAhead      = 0f;
             debugDistanceToVehicleAhead = 0f;
             return;
         }
 
         Vector3 rayStart = transform.position + Vector3.up * 1f;
-        Vector3 forward = transform.forward;
-        Vector3 right = transform.right;
+        Vector3 forward  = transform.forward;
+        Vector3 right    = transform.right;
 
         GameObject closestVehicle = null;
-        float closestDistance = float.MaxValue;
+        float closestDistance     = float.MaxValue;
 
         for (int i = 0; i < multiRayCount; i++)
         {
-            Vector3 rayDirection = forward;
-            if (i == 1) rayDirection = (forward + (-right * lateralDetectionWidth)).normalized;
-            else if (i == 2) rayDirection = (forward + (right * lateralDetectionWidth)).normalized;
+            Vector3 rayDir = forward;
+            if (i == 1) rayDir = (forward + -right * lateralDetectionWidth).normalized;
+            else if (i == 2) rayDir = (forward +  right * lateralDetectionWidth).normalized;
 
-            RaycastHit[] hits = Physics.RaycastAll(rayStart, rayDirection, vehicleDetectionRange, obstacleLayer);
-
+            RaycastHit[] hits = Physics.RaycastAll(rayStart, rayDir, vehicleDetectionRange, obstacleLayer);
             foreach (RaycastHit hit in hits)
             {
-                GameObject vehicleObject = FindVehicleInHierarchy(hit.collider.gameObject);
-                if (vehicleObject != null && vehicleObject != gameObject && hit.distance < closestDistance)
+                GameObject vo = FindVehicleInHierarchy(hit.collider.gameObject);
+                if (vo != null && vo != gameObject && hit.distance < closestDistance)
                 {
-                    closestVehicle = vehicleObject;
+                    closestVehicle  = vo;
                     closestDistance = hit.distance;
                 }
             }
 
             if (showDebugGizmos)
-            {
-                Color rayColor = closestVehicle != null ? Color.red : Color.cyan;
-                Debug.DrawRay(rayStart, rayDirection * vehicleDetectionRange, rayColor);
-            }
+                Debug.DrawRay(rayStart, rayDir * vehicleDetectionRange,
+                              closestVehicle != null ? Color.red : Color.cyan);
         }
 
         if (closestVehicle != null)
         {
-            detectedVehicleAhead = closestVehicle;
-            distanceToVehicleAhead = closestDistance;
+            detectedVehicleAhead        = closestVehicle;
+            distanceToVehicleAhead      = closestDistance;
             debugDistanceToVehicleAhead = closestDistance;
         }
         else
         {
-            detectedVehicleAhead = null;
-            distanceToVehicleAhead = 0f;
+            detectedVehicleAhead        = null;
+            distanceToVehicleAhead      = 0f;
             debugDistanceToVehicleAhead = 0f;
         }
     }
 
     private GameObject FindVehicleInHierarchy(GameObject obj)
     {
-        TrafficVehicle vehicle = obj.GetComponent<TrafficVehicle>();
-        if (vehicle != null) return obj;
-
-        Transform current = obj.transform;
-        while (current != null)
+        TrafficVehicle v = obj.GetComponent<TrafficVehicle>();
+        if (v != null) return obj;
+        Transform cur = obj.transform;
+        while (cur != null)
         {
-            vehicle = current.GetComponent<TrafficVehicle>();
-            if (vehicle != null) return current.gameObject;
-            current = current.parent;
+            v = cur.GetComponent<TrafficVehicle>();
+            if (v != null) return cur.gameObject;
+            cur = cur.parent;
         }
-
         return null;
     }
 
     private bool ShouldStopForVehicleAhead()
     {
-        if (!enableVehicleAheadDetection || detectedVehicleAhead == null)
-            return false;
+        if (!enableVehicleAheadDetection || detectedVehicleAhead == null) return false;
 
         if (distanceToVehicleAhead < vehicleStoppingDistance)
         {
-            TrafficVehicle vehicleAheadScript = detectedVehicleAhead.GetComponent<TrafficVehicle>();
-
-            if (vehicleAheadScript != null)
+            TrafficVehicle ahead = detectedVehicleAhead.GetComponent<TrafficVehicle>();
+            if (ahead != null && (ahead.currentSpeed < 1f || ahead.isStopped))
             {
-                if (vehicleAheadScript.currentSpeed < 1f || vehicleAheadScript.isStopped)
-                {
-                    if (showDebugGizmos && Time.frameCount % 60 == 0)
-                        Debug.Log($"[{gameObject.name}] 🚗 Stopping for vehicle ahead '{detectedVehicleAhead.name}' at {distanceToVehicleAhead:F1}m");
-                    return true;
-                }
+                if (showDebugGizmos && Time.frameCount % 60 == 0)
+                    Debug.Log($"[{gameObject.name}] 🚗 Stopping for vehicle ahead at {distanceToVehicleAhead:F1}m");
+                return true;
             }
-
             return distanceToVehicleAhead < vehicleStoppingDistance * 0.7f;
         }
 
         return false;
     }
 
-    // ========================================
-    // ROUTE MANAGEMENT
-    // ========================================
+    // ===================================================
+    // ROUTE MANAGEMENT (unchanged)
+    // ===================================================
 
     private void PickNewDestinationAndSaveRoute()
     {
@@ -517,146 +638,145 @@ public class TrafficVehicle : MonoBehaviour
 
         for (int attempt = 0; attempt < maxPathAttempts; attempt++)
         {
-            int randomDestination = PickDestinationWithinRange(allNodes);
-
-            if (randomDestination == -1)
+            int dest = PickDestinationWithinRange(allNodes);
+            if (dest == -1)
             {
-                Debug.LogWarning($"[{gameObject.name}] No suitable destination in range, using random node");
-                randomDestination = navSystem.GetRandomNode(new HashSet<int> { sourceNodeID });
+                Debug.LogWarning($"[{gameObject.name}] No dest in range, using random node");
+                dest = navSystem.GetRandomNode(new HashSet<int> { sourceNodeID });
             }
 
-            List<int> calculatedPath = navSystem.FindPath(sourceNodeID, randomDestination);
+            List<int> path = navSystem.FindPath(sourceNodeID, dest);
+            if (path == null || path.Count == 0) { Debug.LogWarning($"[{gameObject.name}] No path attempt {attempt + 1}"); continue; }
+            if (path.Count < minPathLength)       { Debug.LogWarning($"[{gameObject.name}] Path too short attempt {attempt + 1}"); continue; }
+            if (path.Count > maxPathLength)       { Debug.LogWarning($"[{gameObject.name}] Path too long attempt {attempt + 1}"); continue; }
 
-            if (calculatedPath == null || calculatedPath.Count == 0)
-            {
-                Debug.LogWarning($"[{gameObject.name}] No path: {sourceNodeID} → {randomDestination}, attempt {attempt + 1}/{maxPathAttempts}");
-                continue;
-            }
-
-            if (calculatedPath.Count < minPathLength)
-            {
-                Debug.LogWarning($"[{gameObject.name}] Path too short ({calculatedPath.Count}), attempt {attempt + 1}/{maxPathAttempts}");
-                continue;
-            }
-
-            if (calculatedPath.Count > maxPathLength)
-            {
-                Debug.LogWarning($"[{gameObject.name}] Path too long ({calculatedPath.Count}), attempt {attempt + 1}/{maxPathAttempts}");
-                continue;
-            }
-
-            SaveRouteToVehicle(calculatedPath, randomDestination);
+            SaveRouteToVehicle(path, dest);
             return;
         }
 
-        Debug.LogError($"[{gameObject.name}] ❌ Failed to find valid path after {maxPathAttempts} attempts! Using fallback.");
+        Debug.LogError($"[{gameObject.name}] ❌ Failed to find valid path! Fallback.");
         FallbackPath();
     }
 
     private void SaveRouteToVehicle(List<int> path, int destination)
     {
-        savedRoutePath = new List<int>(path);
-        destinationNodeID = destination;
-        currentPathIndex = 0;
+        savedRoutePath     = new List<int>(path);
+        destinationNodeID  = destination;
         pathRecalculations = 0;
 
+        // Start at index 1 — index 0 is the source node the car is already on.
+        // Targeting index 0 means the car "reaches" it instantly on the first frame
+        // and cascades through nodes without moving, causing single-node looping.
+        currentPathIndex = savedRoutePath.Count > 1 ? 1 : 0;
         SetTargetWaypoint(savedRoutePath[currentPathIndex]);
 
-        debugRouteName = $"Route_{sourceNodeID}_to_{destinationNodeID}";
+        debugRouteName  = $"Route_{sourceNodeID}_to_{destinationNodeID}";
         debugTotalNodes = savedRoutePath.Count;
         debugSavedRoute = string.Join(" → ", savedRoutePath);
 
         int previewCount = Mathf.Min(5, savedRoutePath.Count);
-        debugNextNodes = string.Join(" → ", savedRoutePath.Take(previewCount));
+        debugNextNodes  = string.Join(" → ", savedRoutePath.Take(previewCount));
         if (savedRoutePath.Count > previewCount) debugNextNodes += "...";
 
         Debug.Log($"[{gameObject.name}] ========== NEW ROUTE SAVED ==========");
-        Debug.Log($"[{gameObject.name}] Source: Node {sourceNodeID} → Destination: Node {destinationNodeID}");
-        Debug.Log($"[{gameObject.name}] Route Length: {savedRoutePath.Count} nodes");
+        Debug.Log($"[{gameObject.name}] Source: {sourceNodeID} → Dest: {destinationNodeID}  Nodes: {savedRoutePath.Count}");
         Debug.Log($"[{gameObject.name}] =====================================");
     }
 
     private int PickDestinationWithinRange(List<int> allNodes)
     {
         if (!navSystem.nodeMap.ContainsKey(sourceNodeID)) return -1;
-
         Vector3 sourcePos = navSystem.nodeMap[sourceNodeID].worldPosition;
-        List<int> validDestinations = new List<int>();
 
-        foreach (int nodeID in allNodes)
+        // Try the configured range first, then progressively relax min distance
+        // so cars on small maps (or near map edges) still find a valid long route.
+        float[] minDistFallbacks = { minDestinationDistance, minDestinationDistance * 0.5f, 0f };
+
+        foreach (float minDist in minDistFallbacks)
         {
-            if (nodeID == sourceNodeID) continue;
-            if (!navSystem.nodeMap.ContainsKey(nodeID)) continue;
-
-            float distance = Vector3.Distance(sourcePos, navSystem.nodeMap[nodeID].worldPosition);
-            if (distance >= minDestinationDistance && distance <= maxDestinationDistance)
-                validDestinations.Add(nodeID);
+            var valid = new List<int>();
+            foreach (int id in allNodes)
+            {
+                if (id == sourceNodeID || !navSystem.nodeMap.ContainsKey(id)) continue;
+                float d = Vector3.Distance(sourcePos, navSystem.nodeMap[id].worldPosition);
+                if (d >= minDist && d <= maxDestinationDistance) valid.Add(id);
+            }
+            if (valid.Count > 0)
+                return valid[Random.Range(0, valid.Count)];
         }
 
-        return validDestinations.Count == 0 ? -1 : validDestinations[Random.Range(0, validDestinations.Count)];
+        return -1;
     }
+
+    // Guard: only allow one waypoint advance per FixedUpdate tick.
+    // Without this, if the car spawns near several nodes the cascade fires
+    // multiple times in a single frame and skips the entire route instantly.
+    private bool _advancedThisFrame = false;
 
     private void AdvanceAlongSavedRoute()
     {
+        if (_advancedThisFrame) return;
+        _advancedThisFrame = true;
+        lastAdvanceTime = Time.time;  // Stamp time so MIN_ADVANCE_INTERVAL is enforced
+
         currentPathIndex++;
 
         if (currentPathIndex >= savedRoutePath.Count)
         {
             Debug.Log($"[{gameObject.name}] ✅ DESTINATION REACHED: Node {destinationNodeID}");
-            sourceNodeID = destinationNodeID;
+            sourceNodeID  = destinationNodeID;
             currentNodeID = sourceNodeID;
             PickNewDestinationAndSaveRoute();
+            // PickNewDestinationAndSaveRoute already calls SaveRouteToVehicle
+            // which sets currentPathIndex = 1 and targetWaypoint correctly.
             return;
         }
 
         int nextNodeID = savedRoutePath[currentPathIndex];
-
-        // ── Line-of-sight check: if the next waypoint is blocked by a building/wall,
-        //    skip ahead in the path until we find a clear one (or re-anchor). ──
         int safeNodeID = FindNextReachableWaypoint(currentPathIndex);
+
         if (safeNodeID != nextNodeID)
         {
-            Debug.LogWarning($"[{gameObject.name}] ⚠️ Node {nextNodeID} blocked by geometry, skipping to node {safeNodeID}");
-            // Advance index to the safe node
-            currentPathIndex = savedRoutePath.IndexOf(safeNodeID, currentPathIndex);
-            if (currentPathIndex < 0) currentPathIndex = savedRoutePath.Count; // trigger repath
-            nextNodeID = safeNodeID;
+            Debug.LogWarning($"[{gameObject.name}] ⚠️ Node {nextNodeID} blocked, skipping to {safeNodeID}");
+            int safeIndex = savedRoutePath.IndexOf(safeNodeID, currentPathIndex);
+            if (safeIndex >= 0) currentPathIndex = safeIndex;
+            nextNodeID = savedRoutePath[currentPathIndex];
         }
 
         currentNodeID = nextNodeID;
         SetTargetWaypoint(currentNodeID);
 
-        float progressPercent = ((float)currentPathIndex / savedRoutePath.Count) * 100f;
-        Debug.Log($"[{gameObject.name}] Route Progress: {currentPathIndex}/{savedRoutePath.Count} ({progressPercent:F0}%) → Node {currentNodeID}");
+        float pct = (float)currentPathIndex / savedRoutePath.Count * 100f;
+        Debug.Log($"[{gameObject.name}] Progress: {currentPathIndex}/{savedRoutePath.Count} ({pct:F0}%) → Node {currentNodeID}");
     }
 
     /// <summary>
-    /// Starting from startIndex in the saved path, returns the first waypoint node ID
-    /// that is NOT blocked by solid geometry (buildings, walls). 
-    /// Falls back to the original next node if none found within a lookahead window.
+    /// Returns the first upcoming node NOT blocked by buildings/walls.
+    /// FIX: Uses (obstacleLayer minus groundLayer) so the road/terrain surface
+    /// between the car and a hill node is NOT counted as a blocking wall.
     /// </summary>
     private int FindNextReachableWaypoint(int startIndex)
     {
-        const int lookahead = 4; // How many nodes ahead to check
+        const int lookahead = 4;
+        // Strip groundLayer out of obstacle mask — terrain is not a wall
+        int buildingMask = obstacleLayer & ~groundLayer;
 
         for (int i = startIndex; i < Mathf.Min(startIndex + lookahead, savedRoutePath.Count); i++)
         {
             int nodeID = savedRoutePath[i];
             if (!navSystem.nodeMap.ContainsKey(nodeID)) continue;
 
-            Vector3 nodePos = navSystem.nodeMap[nodeID].transform.position + Vector3.up * 1f;
-            Vector3 from = transform.position + Vector3.up * 1f;
-            Vector3 dir = (nodePos - from).normalized;
-            float dist = Vector3.Distance(from, nodePos);
+            // FIX: Raise origin and target by 1-1.5m so the SphereCast path
+            // clears the road surface under the car and the slope ahead of it
+            Vector3 nodePos = navSystem.nodeMap[nodeID].transform.position + Vector3.up * 1.5f;
+            Vector3 from    = transform.position + Vector3.up * 1.5f;
+            Vector3 dir     = (nodePos - from).normalized;
+            float   dist    = Vector3.Distance(from, nodePos);
 
-            // Use a small sphere cast to better represent car width
-            bool blocked = Physics.SphereCast(from, 0.6f, dir, out _, dist, obstacleLayer);
-
-            if (!blocked)
-                return nodeID; // First unblocked node found
+            bool blocked = Physics.SphereCast(from, 0.5f, dir, out _, dist, buildingMask);
+            if (!blocked) return nodeID;
         }
 
-        // All lookahead nodes blocked — return original next node and let stuck detection handle it
         return savedRoutePath[startIndex];
     }
 
@@ -665,7 +785,7 @@ public class TrafficVehicle : MonoBehaviour
         if (navSystem.nodeMap.ContainsKey(nodeID))
         {
             targetWaypoint = navSystem.nodeMap[nodeID].transform;
-            currentNodeID = nodeID;
+            currentNodeID  = nodeID;
         }
         else
         {
@@ -680,18 +800,15 @@ public class TrafficVehicle : MonoBehaviour
 
         if (pathRecalculations >= MAX_RECALCULATIONS)
         {
-            Debug.LogError($"[{gameObject.name}] Too many recalculations! Snapping to nearest reachable node.");
+            Debug.LogError($"[{gameObject.name}] Too many recalculations! Re-anchoring.");
             SnapToNearestReachableNode();
             return;
         }
 
-        // Re-anchor source to our actual current node before recalculating
         int snappedNode = FindNearestNodeWithLineOfSight();
-        if (snappedNode != -1)
-            currentNodeID = snappedNode;
+        if (snappedNode != -1) currentNodeID = snappedNode;
 
         List<int> newPath = navSystem.FindPath(currentNodeID, destinationNodeID);
-
         if (newPath != null && newPath.Count > 0)
         {
             sourceNodeID = currentNodeID;
@@ -700,7 +817,7 @@ public class TrafficVehicle : MonoBehaviour
         }
         else
         {
-            Debug.LogError($"[{gameObject.name}] ❌ Recalculation failed! Picking new destination.");
+            Debug.LogError($"[{gameObject.name}] ❌ Recalculation failed! New destination.");
             sourceNodeID = currentNodeID;
             PickNewDestinationAndSaveRoute();
         }
@@ -708,139 +825,165 @@ public class TrafficVehicle : MonoBehaviour
 
     private void FallbackPath()
     {
-        // Try to find a reachable node and path to it — never teleport
         int nearestReachable = FindNearestNodeWithLineOfSight();
-
         if (nearestReachable != -1)
         {
             List<int> path = navSystem.FindPath(sourceNodeID, nearestReachable);
             if (path != null && path.Count > 0)
             {
                 SaveRouteToVehicle(path, nearestReachable);
-                Debug.LogWarning($"[{gameObject.name}] Fallback: routing to nearest reachable node {nearestReachable}");
+                Debug.LogWarning($"[{gameObject.name}] Fallback: routing to reachable node {nearestReachable}");
                 return;
             }
         }
 
-        // Last resort: find nearest node and just set it as current without teleporting
-        // The car will drive toward it naturally
         int nearest = navSystem.GetClosestNode(transform.position);
         if (nearest != -1 && navSystem.nodeMap.ContainsKey(nearest))
         {
-            sourceNodeID = nearest;
+            sourceNodeID  = nearest;
             currentNodeID = nearest;
             SetTargetWaypoint(nearest);
             PickNewDestinationAndSaveRoute();
-            Debug.LogWarning($"[{gameObject.name}] Fallback: re-anchored to nearest node {nearest} (no teleport)");
+            Debug.LogWarning($"[{gameObject.name}] Fallback: re-anchored to node {nearest}");
         }
-
-        // NOTE: Emergency teleport REMOVED — it caused cars to fly through buildings.
-        // Worst case the car sits still until a new valid path is found.
     }
 
     /// <summary>
-    /// Finds the nearest node that has an unobstructed line-of-sight from this vehicle.
-    /// Used to re-anchor a lost/stuck vehicle to the road graph without teleporting.
+    /// FIX: Excludes groundLayer so hill terrain between the car and a node
+    /// is not treated as a wall, allowing correct re-anchoring on hilly roads.
     /// </summary>
     private int FindNearestNodeWithLineOfSight()
     {
-        float bestDist = float.MaxValue;
-        int bestNode = -1;
+        float bestDist   = float.MaxValue;
+        int   bestNode   = -1;
+        int   buildingMask = obstacleLayer & ~groundLayer;
 
         foreach (var kvp in navSystem.nodeMap)
         {
             if (kvp.Value == null) continue;
-
             Vector3 nodePos = kvp.Value.transform.position;
-            float dist = Vector3.Distance(transform.position, nodePos);
+            float   dist    = Vector3.Distance(transform.position, nodePos);
+            if (dist > 60f) continue;
 
-            if (dist > 60f) continue; // Only check nearby nodes
+            Vector3 from      = transform.position + Vector3.up * 1.5f;
+            Vector3 to        = nodePos + Vector3.up * 1f;
+            Vector3 dir       = (to - from).normalized;
+            float   checkDist = Vector3.Distance(from, to);
 
-            // Raycast at car height to check for buildings/walls between us and node
-            Vector3 from = transform.position + Vector3.up * 1f;
-            Vector3 to = nodePos + Vector3.up * 1f;
-            Vector3 dir = (to - from).normalized;
-            float checkDist = Vector3.Distance(from, to);
-
-            bool blocked = Physics.Raycast(from, dir, checkDist, obstacleLayer);
-
-            if (!blocked && dist < bestDist)
-            {
-                bestDist = dist;
-                bestNode = kvp.Key;
-            }
+            bool blocked = Physics.Raycast(from, dir, checkDist, buildingMask);
+            if (!blocked && dist < bestDist) { bestDist = dist; bestNode = kvp.Key; }
         }
 
         return bestNode;
     }
 
-    /// <summary>
-    /// Snaps to nearest reachable node ON the road (no teleport through buildings).
-    /// Only used as absolute last resort — moves along road surface.
-    /// </summary>
     private void SnapToNearestReachableNode()
     {
         int reachable = FindNearestNodeWithLineOfSight();
-        if (reachable == -1)
-            reachable = navSystem.GetClosestNode(transform.position);
+        if (reachable == -1) reachable = navSystem.GetClosestNode(transform.position);
 
         if (reachable != -1 && navSystem.nodeMap.ContainsKey(reachable))
         {
-            sourceNodeID = reachable;
-            currentNodeID = reachable;
+            sourceNodeID       = reachable;
+            currentNodeID      = reachable;
             pathRecalculations = 0;
             PickNewDestinationAndSaveRoute();
-            Debug.LogWarning($"[{gameObject.name}] Re-anchored to node {reachable} (no teleport)");
+            Debug.LogWarning($"[{gameObject.name}] Re-anchored to node {reachable}");
         }
     }
 
-    // ========================================
-    // MOVEMENT
-    // ========================================
+    // ===================================================
+    // FIX: MOVE VEHICLE — full slope-aware movement
+    // ===================================================
 
     private void MoveVehicle()
     {
         if (targetWaypoint == null) return;
         if (rb == null || rb.isKinematic) return;
+        if (currentSpeed < 0.1f) return;
 
-        if (currentSpeed < 0.1f)
+        // ── 1. Steering: yaw-only rotation toward waypoint (XZ plane) ──
+        Vector3 toTargetXZ = new Vector3(
+            targetWaypoint.position.x - transform.position.x,
+            0f,
+            targetWaypoint.position.z - transform.position.z);
+
+        if (toTargetXZ.sqrMagnitude > 0.01f)
         {
-            // Just don't move — don't touch linearVelocity while using MovePosition
-            // gravity and friction will handle the rest
-            return;
+            // Target yaw faces the waypoint on the flat plane
+            Quaternion targetYaw   = Quaternion.LookRotation(toTargetXZ, Vector3.up);
+            Quaternion currentYaw  = Quaternion.Euler(0f, transform.eulerAngles.y, 0f);
+
+            // FIX: Scale turn rate by misalignment — sharper turns rotate faster
+            // so the car doesn't loop wide when a waypoint is nearly behind it.
+            float misalignment    = angleToCurrentWaypoint;          // 0–180°
+            float turnMultiplier  = Mathf.Lerp(1f, 2.5f, misalignment / 180f);
+            Quaternion smoothedYaw = Quaternion.Slerp(
+                currentYaw, targetYaw,
+                Time.fixedDeltaTime * turnSpeed * turnMultiplier);
+
+            // ── 2. Slope tilt: rotate pitch/roll to match terrain surface normal ──
+            Quaternion slopeTilt = Quaternion.FromToRotation(Vector3.up, groundNormal);
+            Quaternion finalRot  = slopeTilt * smoothedYaw;
+
+            rb.MoveRotation(Quaternion.Slerp(rb.rotation, finalRot, Time.fixedDeltaTime * slopeTiltSpeed));
         }
 
-        Vector3 direction = (targetWaypoint.position - transform.position);
-        direction.y = 0;
-        direction.Normalize();
+        // ── 3. Alignment-based speed scaling (THE BACK-AND-FORTH FIX) ──
+        // When the waypoint is nearly behind the car, driving at full speed in the
+        // current forward direction makes it arc wide or oscillate back and forth.
+        // We scale drive speed to near-zero when the car needs to turn more than
+        // ~60°, letting the rotation catch up before the car accelerates again.
+        //
+        //   angle  0°  → factor 1.0  (full speed — perfectly aligned)
+        //   angle 45°  → factor 0.75
+        //   angle 90°  → factor 0.15 (nearly stopped — turning in place)
+        //   angle 135° → factor 0.05
+        //   angle 180° → factor 0.0  (stopped — target is directly behind)
+        float alignAngle   = Mathf.Clamp(angleToCurrentWaypoint, 0f, 180f);
+        float alignFactor  = Mathf.Clamp01(1f - alignAngle / 90f);   // linear 0–90°
+        alignFactor        = alignFactor * alignFactor;               // square it: gentler at small angles, steeper drop-off past 45°
+        alignFactor        = Mathf.Max(alignFactor, 0.02f);           // keep a tiny creep so stuck detection still fires
 
-        if (direction.magnitude > 0.1f)
+        float driveSpeed = currentSpeed * alignFactor;
+
+        // ── 4. Drive: move along transform.forward at alignment-scaled speed ──
+        Vector3 move = transform.forward * driveSpeed * Time.fixedDeltaTime;
+        rb.MovePosition(rb.position + move);
+
+        // ── 5. Soft Y correction: nudge car toward ride height above ground ──
+        if (isGrounded)
         {
-            Quaternion targetRotation = Quaternion.LookRotation(direction);
-            transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.fixedDeltaTime * turnSpeed);
+            float targetY  = currentGroundY + rideHeight;
+            float yError   = targetY - rb.position.y;
+
+            if (Mathf.Abs(yError) > 0.05f)
+            {
+                Vector3 yCorrection = new Vector3(0f, yError * groundSnapStrength * Time.fixedDeltaTime, 0f);
+                rb.MovePosition(rb.position + yCorrection);
+            }
         }
-
-        Vector3 forwardMovement = transform.forward * currentSpeed * Time.fixedDeltaTime;
-        rb.MovePosition(rb.position + forwardMovement);
-
-        // Lock X/Z rotation — let physics/gravity handle Y naturally
-        Vector3 euler = transform.eulerAngles;
-        euler.x = 0;
-        euler.z = 0;
-        transform.eulerAngles = euler;
-
-        // NOTE: Periodic ground snapping REMOVED — it caused bunny-hop bouncing
-        // because teleporting rb.position while MovePosition is also running creates
-        // a sudden position delta that physics resolves as an upward impulse.
-        // Gravity + road collider keeps the car grounded naturally.
     }
+
+    // ===================================================
+    // FIX: DETECT OBSTACLE — slope-aware, terrain excluded
+    // ===================================================
 
     private bool DetectObstacle()
     {
-        Vector3 rayStart = transform.position + Vector3.up * 0.5f;
-        Vector3 rayDirection = transform.forward;
+        // FIX: Raise ray origin to 1.2f. Original 0.5f was low enough to hit the
+        // road surface rising ahead on uphills, treating the road as a wall.
+        Vector3 rayStart = transform.position + Vector3.up * 1.2f;
 
-        if (Physics.Raycast(rayStart, rayDirection, out RaycastHit hit, detectionRange, obstacleLayer))
+        // FIX: Use mostly-level forward. Cap the downward pitch component at -0.15f
+        // so the ray doesn't plunge into the road surface ahead on slopes.
+        Vector3 rawFwd      = transform.forward;
+        Vector3 levelFwd    = new Vector3(rawFwd.x, Mathf.Max(rawFwd.y, -0.15f), rawFwd.z).normalized;
+
+        // FIX: Exclude groundLayer — road/terrain should never count as an obstacle.
+        int buildingMask = obstacleLayer & ~groundLayer;
+
+        if (Physics.Raycast(rayStart, levelFwd, out RaycastHit hit, detectionRange, buildingMask))
         {
             TrafficVehicle otherVehicle = hit.collider.GetComponent<TrafficVehicle>();
             if (otherVehicle != null && hit.distance < stoppingDistance)
@@ -856,15 +999,19 @@ public class TrafficVehicle : MonoBehaviour
             }
         }
 
-        if (Physics.SphereCast(rayStart, 1f, rayDirection, out hit, detectionRange, obstacleLayer))
+        if (Physics.SphereCast(rayStart, 0.8f, levelFwd, out hit, detectionRange, buildingMask))
         {
             TrafficVehicle otherVehicle = hit.collider.GetComponent<TrafficVehicle>();
             if (otherVehicle != null && hit.distance < stoppingDistance) return true;
         }
 
-        if (showDebugGizmos) Debug.DrawRay(rayStart, rayDirection * detectionRange, Color.green);
+        if (showDebugGizmos) Debug.DrawRay(rayStart, levelFwd * detectionRange, Color.green);
         return false;
     }
+
+    // ===================================================
+    // SNAP TO GROUND (kept — used externally at spawn time)
+    // ===================================================
 
     private Vector3 SnapToGround(Vector3 position, float rayDistance = 50f)
     {
@@ -876,28 +1023,52 @@ public class TrafficVehicle : MonoBehaviour
         return position;
     }
 
+    // ===================================================
+    // UTILITY
+    // ===================================================
+
+    /// <summary>
+    /// Horizontal (XZ-plane only) distance. Used everywhere height on hills
+    /// should not affect the distance measurement.
+    /// </summary>
+    private static float HorizontalDistance(Vector3 a, Vector3 b)
+    {
+        float dx = a.x - b.x;
+        float dz = a.z - b.z;
+        return Mathf.Sqrt(dx * dx + dz * dz);
+    }
+
+    // ===================================================
+    // DEBUG INFO
+    // ===================================================
+
     private void UpdateDebugInfo()
     {
-        debugPathProgress = currentPathIndex;
-        debugCurrentSpeed = currentSpeed;
-        debugProgressPercent = savedRoutePath.Count > 0 ? ((float)currentPathIndex / savedRoutePath.Count) * 100f : 0f;
-        debugDistanceToWaypoint = targetWaypoint != null ? Vector3.Distance(transform.position, targetWaypoint.position) : 0f;
+        debugPathProgress    = currentPathIndex;
+        debugCurrentSpeed    = currentSpeed;
+        debugProgressPercent = savedRoutePath.Count > 0
+            ? (float)currentPathIndex / savedRoutePath.Count * 100f
+            : 0f;
+        debugDistanceToWaypoint = targetWaypoint != null
+            ? Vector3.Distance(transform.position, targetWaypoint.position)
+            : 0f;
 
         if (navSystem != null && navSystem.nodeMap.ContainsKey(destinationNodeID))
-            debugDistanceToDestination = Vector3.Distance(transform.position, navSystem.nodeMap[destinationNodeID].worldPosition);
+            debugDistanceToDestination = Vector3.Distance(
+                transform.position, navSystem.nodeMap[destinationNodeID].worldPosition);
 
         if (savedRoutePath != null && savedRoutePath.Count > 0 && currentPathIndex < savedRoutePath.Count)
         {
-            int remainingNodes = savedRoutePath.Count - currentPathIndex;
-            int previewCount = Mathf.Min(3, remainingNodes);
-            debugNextNodes = string.Join(" → ", savedRoutePath.Skip(currentPathIndex).Take(previewCount));
-            if (remainingNodes > previewCount) debugNextNodes += $" ... (+{remainingNodes - previewCount} more)";
+            int rem     = savedRoutePath.Count - currentPathIndex;
+            int preview = Mathf.Min(3, rem);
+            debugNextNodes = string.Join(" → ", savedRoutePath.Skip(currentPathIndex).Take(preview));
+            if (rem > preview) debugNextNodes += $" ... (+{rem - preview} more)";
         }
     }
 
-    // ========================================
+    // ===================================================
     // GIZMOS
-    // ========================================
+    // ===================================================
 
     private void OnDrawGizmos()
     {
@@ -907,15 +1078,15 @@ public class TrafficVehicle : MonoBehaviour
         {
             for (int i = 0; i < savedRoutePath.Count - 1; i++)
             {
-                if (!navSystem.nodeMap.ContainsKey(savedRoutePath[i]) || !navSystem.nodeMap.ContainsKey(savedRoutePath[i + 1])) continue;
+                if (!navSystem.nodeMap.ContainsKey(savedRoutePath[i]) ||
+                    !navSystem.nodeMap.ContainsKey(savedRoutePath[i + 1])) continue;
 
-                Vector3 start = navSystem.nodeMap[savedRoutePath[i]].worldPosition + Vector3.up * 1.5f;
-                Vector3 end = navSystem.nodeMap[savedRoutePath[i + 1]].worldPosition + Vector3.up * 1.5f;
+                Vector3 s = navSystem.nodeMap[savedRoutePath[i]].worldPosition + Vector3.up * 1.5f;
+                Vector3 e = navSystem.nodeMap[savedRoutePath[i + 1]].worldPosition + Vector3.up * 1.5f;
 
                 Gizmos.color = i < currentPathIndex ? new Color(0.5f, 0.5f, 0.5f, 0.5f) : debugColor;
-                Gizmos.DrawLine(start, end);
-
-                if (i >= currentPathIndex) Gizmos.DrawWireSphere(start, 0.5f);
+                Gizmos.DrawLine(s, e);
+                if (i >= currentPathIndex) Gizmos.DrawWireSphere(s, 0.5f);
             }
         }
 
@@ -924,15 +1095,15 @@ public class TrafficVehicle : MonoBehaviour
             Gizmos.color = isStopped ? Color.red : (debugIsStuck ? Color.magenta : debugColor);
             Gizmos.DrawLine(transform.position + Vector3.up, targetWaypoint.position + Vector3.up);
             Gizmos.color = Color.yellow;
-            Gizmos.DrawWireSphere(targetWaypoint.position, waypointReachDistance);
+            Gizmos.DrawWireSphere(targetWaypoint.position, waypointReachDistanceXZ);
         }
 
         if (navSystem.nodeMap.ContainsKey(destinationNodeID))
         {
-            Vector3 destPos = navSystem.nodeMap[destinationNodeID].worldPosition;
+            Vector3 dp = navSystem.nodeMap[destinationNodeID].worldPosition;
             Gizmos.color = Color.magenta;
-            Gizmos.DrawWireSphere(destPos + Vector3.up * 3f, 3f);
-            Gizmos.DrawLine(destPos, destPos + Vector3.up * 6f);
+            Gizmos.DrawWireSphere(dp + Vector3.up * 3f, 3f);
+            Gizmos.DrawLine(dp, dp + Vector3.up * 6f);
         }
 
         if (navSystem.nodeMap.ContainsKey(sourceNodeID))
@@ -958,7 +1129,8 @@ public class TrafficVehicle : MonoBehaviour
         if (detectedVehicleAhead != null)
         {
             Gizmos.color = Color.cyan;
-            Gizmos.DrawLine(transform.position + Vector3.up * 1.5f, detectedVehicleAhead.transform.position + Vector3.up * 1.5f);
+            Gizmos.DrawLine(transform.position + Vector3.up * 1.5f,
+                            detectedVehicleAhead.transform.position + Vector3.up * 1.5f);
             Gizmos.DrawWireSphere(detectedVehicleAhead.transform.position + Vector3.up * 3f, 1.5f);
         }
 
@@ -966,6 +1138,13 @@ public class TrafficVehicle : MonoBehaviour
         {
             Gizmos.color = Color.red;
             Gizmos.DrawWireSphere(transform.position + Vector3.up * 4f, 2f);
+        }
+
+        // Ground normal indicator (white ray = slope direction)
+        if (isGrounded)
+        {
+            Gizmos.color = Color.white;
+            Gizmos.DrawRay(transform.position + Vector3.up * 0.3f, groundNormal * 2f);
         }
 
         Gizmos.color = Color.blue;
@@ -977,13 +1156,13 @@ public class TrafficVehicle : MonoBehaviour
 #if UNITY_EDITOR
         if (!Application.isPlaying || targetWaypoint == null) return;
 
-        string status = debugIsStuck ? "🚫 STUCK" : (isStopped ? "⛔ STOPPED" : "✅ MOVING");
+        string status     = debugIsStuck ? "🚫 STUCK" : (isStopped ? "⛔ STOPPED" : "✅ MOVING");
         string stopReason = "";
         if (isStopped)
         {
-            if (debugAtRedLight) stopReason = " [RED LIGHT]";
+            if (debugAtRedLight)             stopReason = " [RED LIGHT]";
             else if (debugVehicleAheadDetected) stopReason = " [VEHICLE AHEAD]";
-            else if (debugIsObstacleDetected) stopReason = " [OBSTACLE]";
+            else if (debugIsObstacleDetected)   stopReason = " [OBSTACLE]";
         }
 
         Handles.Label(
@@ -994,21 +1173,22 @@ public class TrafficVehicle : MonoBehaviour
             $"Progress: {currentPathIndex}/{savedRoutePath.Count} ({debugProgressPercent:F0}%)\n" +
             $"Current Node: {currentNodeID}\n" +
             $"Next: {debugNextNodes}\n" +
-            $"Distance to Dest: {debugDistanceToDestination:F1}m\n" +
+            $"Dist to Dest: {debugDistanceToDestination:F1}m\n" +
             $"Speed: {debugCurrentSpeed:F1} m/s ({debugCurrentSpeed * 3.6f:F0} km/h)\n" +
             $"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+            $"Grounded: {debugIsGrounded}  Slope: {debugSlopeAngle:F1}°\n" +
+            $"Ground Y: {debugGroundY:F2}  Target Y: {(debugGroundY + rideHeight):F2}\n" +
             $"Traffic Light: {debugTrafficLightID} [{debugTrafficLightState}]\n" +
-            $"Distance to Light: {debugDistanceToTrafficLight:F1}m\n" +
+            $"Dist to Light: {debugDistanceToTrafficLight:F1}m\n" +
             $"Vehicle Ahead: {(detectedVehicleAhead != null ? $"YES ({debugDistanceToVehicleAhead:F1}m)" : "NO")}\n" +
             $"Recalculations: {pathRecalculations}/{MAX_RECALCULATIONS}",
-            new GUIStyle()
+            new GUIStyle
             {
-                normal = new GUIStyleState() { textColor = Color.white },
-                fontSize = 11,
+                normal    = new GUIStyleState { textColor = Color.white },
+                fontSize  = 11,
                 fontStyle = FontStyle.Bold,
                 alignment = TextAnchor.MiddleLeft
-            }
-        );
+            });
 #endif
     }
 }

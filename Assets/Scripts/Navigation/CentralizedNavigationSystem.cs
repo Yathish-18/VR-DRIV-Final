@@ -52,17 +52,60 @@ public class CentralizedNavigationSystem : MonoBehaviour
     [Tooltip("Extra upward offset added after ground snap (tweak if cars still float or clip). Usually 0.")]
     [SerializeField] private float spawnHeightOffset = 0f;
 
+    // --------------------------------------------------------
+    // VEHICLE GROUND / SLOPE SETTINGS
+    // These are pushed into every TrafficVehicle on spawn so
+    // you never have to configure each vehicle individually.
+    // --------------------------------------------------------
+    [Header("=== VEHICLE GROUND / SLOPE SETTINGS ===")]
+    [Tooltip("What surface type your roads sit on. Drives the default groundLayer mask sent to each vehicle.")]
+    [SerializeField] private GroundSurfaceType groundSurfaceType = GroundSurfaceType.Road;
+
+    [Tooltip("Override the auto-computed groundLayer mask. Enable this if your layers are non-standard " +
+             "and the enum selection doesn't match your project.")]
+    [SerializeField] private bool overrideGroundLayer = false;
+
+    [Tooltip("Manual ground layer mask used only when Override Ground Layer is ticked.")]
+    [SerializeField] private LayerMask groundLayerOverride = 0;
+
+    [Tooltip("Target ride height above the road surface (metres). " +
+             "0.5 is a good starting point; raise if cars clip into the road.")]
+    [SerializeField] private float vehicleRideHeight = 0.5f;
+
+    [Tooltip("How strongly each vehicle's Y position is snapped toward the road surface per physics step. " +
+             "8–12 works well. Too high → jitter. Too low → floaty.")]
+    [SerializeField] private float vehicleGroundSnapStrength = 8f;
+
+    [Tooltip("How fast each vehicle tilts to match slope normals. Lower = smoother lean.")]
+    [SerializeField] private float vehicleSlopeTiltSpeed = 5f;
+
+    [Tooltip("Speed multiplier applied when the next node is above the vehicle (uphill). " +
+             "1.3–1.6 prevents stalling on steep roads.")]
+    [SerializeField] private float vehicleHillClimbBoost = 1.4f;
+
+    [Header("=== NODE SNAPPING ===")]
+    [Tooltip("Layer(s) to raycast against when snapping nodes to road/terrain surface. Set this to your Road + Terrain layers.")]
+    public LayerMask snapLayer = ~0;
+    [Tooltip("How high above each node to start the downward raycast. Increase if hills are taller than default.")]
+    public float snapRaycastOriginHeight = 50f;
+    [Tooltip("Y offset added after the node lands on the surface (e.g. 0.05 keeps it just above the mesh).")]
+    public float snapNodeHeightOffset = 0.05f;
+    [Tooltip("Rotate node to match the road/terrain surface normal (good for sloped roads).")]
+    public bool snapAlignToSurface = false;
+    [Tooltip("Auto-snap every newly created node to ground immediately after creation.")]
+    public bool autoSnapNewNodes = false;
+
     [Header("=== TRAFFIC CHAINS (DEPRECATED - NOT USED IN DESTINATION MODE) ===")]
     [Tooltip("Legacy chain system - not used with destination-based traffic")]
     public List<TrafficWaypointChain> trafficChains = new List<TrafficWaypointChain>();
-    
+
     private List<TrafficVehicle> activeVehicles = new List<TrafficVehicle>();
     private int nextNodeID = 0;
 
     // ========================================
     // INITIALIZATION
     // ========================================
-    
+
     private void Awake()
     {
         ValidateAndRebuildGraph();
@@ -218,7 +261,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
         }
 
         int finalID = (id == -1 || nodeMap.ContainsKey(id)) ? nextNodeID++ : id;
-        
+
         if (id >= nextNodeID)
             nextNodeID = id + 1;
 
@@ -233,6 +276,12 @@ public class CentralizedNavigationSystem : MonoBehaviour
         nodes.Add(node);
         nodeMap[finalID] = node;
 
+        // Auto-snap to road surface if requested (only when not playing, to avoid physics issues)
+#if UNITY_EDITOR
+        if (autoSnapNewNodes && !Application.isPlaying)
+            SnapNodeToGround(node);
+#endif
+
         return node;
     }
 
@@ -243,14 +292,14 @@ public class CentralizedNavigationSystem : MonoBehaviour
     public int GetClosestNode(Vector3 worldPosition)
     {
         if (nodeMap.Count == 0) return -1;
-        
+
         float closestDist = float.MaxValue;
         int closestID = -1;
-        
+
         foreach (var kvp in nodeMap)
         {
             if (kvp.Value == null) continue;
-            
+
             float dist = Vector3.Distance(worldPosition, kvp.Value.worldPosition);
             if (dist < closestDist)
             {
@@ -258,7 +307,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
                 closestID = kvp.Key;
             }
         }
-        
+
         return closestID;
     }
 
@@ -284,7 +333,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
             .Where(id => id != fromNodeID && nodeMap.ContainsKey(id))
             .Where(id => Vector3.Distance(nodeMap[fromNodeID].worldPosition, nodeMap[id].worldPosition) >= minDistance)
             .ToList();
-        
+
         return candidates.Count > 0 ? candidates[UnityEngine.Random.Range(0, candidates.Count)] : fromNodeID;
     }
 
@@ -314,8 +363,8 @@ public class CentralizedNavigationSystem : MonoBehaviour
         while (openSet.Count > 0)
         {
             int current = openSet.Dequeue();
-            
-            if (current == target) 
+
+            if (current == target)
                 return ReconstructPath(cameFrom, current);
 
             closedSet.Add(current);
@@ -354,7 +403,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
     public List<int> GetNeighbors(int nodeID)
     {
         List<int> neighbors = new List<int>();
-        
+
         foreach (var c in connectionDefinitions)
         {
             if (c.fromNodeID == nodeID && nodeMap.ContainsKey(c.toNodeID))
@@ -362,7 +411,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
             else if (c.bidirectional && c.toNodeID == nodeID && nodeMap.ContainsKey(c.fromNodeID))
                 neighbors.Add(c.fromNodeID);
         }
-        
+
         return neighbors.Distinct().ToList();
     }
 
@@ -499,7 +548,8 @@ public class CentralizedNavigationSystem : MonoBehaviour
                 traffic = vehicleObj.AddComponent<TrafficVehicle>();
 
             float speed = vehicleSpeed * UnityEngine.Random.Range(0.85f, 1.15f);
-            traffic.Initialize(this, nodeID, speed, stoppingDistance, detectionRange, obstacleLayer);
+            VehicleGroundConfig groundConfig = BuildVehicleGroundConfig();
+            traffic.Initialize(this, nodeID, speed, stoppingDistance, detectionRange, obstacleLayer, groundConfig);
 
             // Release kinematic after physics settles
             StartCoroutine(ReleaseKinematicNextFrame(rb));
@@ -545,7 +595,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
                 Destroy(v.gameObject);
         }
         activeVehicles.Clear();
-        
+
         Debug.Log("[Traffic] All traffic cleared");
     }
 
@@ -630,13 +680,14 @@ public class CentralizedNavigationSystem : MonoBehaviour
 
 #if UNITY_EDITOR
                 UnityEditor.Handles.Label(
-                    node.transform.position + Vector3.up * 1.2f, 
+                    node.transform.position + Vector3.up * 1.2f,
                     $"Node {node.nodeID}",
-                    new GUIStyle() { 
-                        normal = new GUIStyleState() { textColor = Color.white }, 
-                        fontSize = 14, 
-                        fontStyle = FontStyle.Bold, 
-                        alignment = TextAnchor.MiddleCenter 
+                    new GUIStyle()
+                    {
+                        normal = new GUIStyleState() { textColor = Color.white },
+                        fontSize = 14,
+                        fontStyle = FontStyle.Bold,
+                        alignment = TextAnchor.MiddleCenter
                     }
                 );
 #endif
@@ -649,23 +700,23 @@ public class CentralizedNavigationSystem : MonoBehaviour
             foreach (var conn in connectionDefinitions)
             {
                 if (!nodeMap.ContainsKey(conn.fromNodeID) || !nodeMap.ContainsKey(conn.toNodeID)) continue;
-                
+
                 Vector3 start = nodeMap[conn.fromNodeID].transform.position + Vector3.up * 0.2f;
                 Vector3 end = nodeMap[conn.toNodeID].transform.position + Vector3.up * 0.2f;
-                
-                Gizmos.color = conn.bidirectional 
+
+                Gizmos.color = conn.bidirectional
                     ? new Color(0f, 1f, 0f, 0.8f)  // Green for bidirectional
                     : new Color(1f, 0.5f, 0f, 0.8f); // Orange for one-way
-                
+
                 Gizmos.DrawLine(start, end);
-                
+
                 // Draw arrow for one-way connections
                 if (!conn.bidirectional)
                 {
                     Vector3 direction = (end - start).normalized;
                     Vector3 midPoint = start + direction * Vector3.Distance(start, end) * 0.5f;
                     Vector3 right = Vector3.Cross(Vector3.up, direction) * 0.5f;
-                    
+
                     Gizmos.DrawLine(midPoint, midPoint - direction * 1f + right);
                     Gizmos.DrawLine(midPoint, midPoint - direction * 1f - right);
                 }
@@ -710,10 +761,10 @@ public class CentralizedNavigationSystem : MonoBehaviour
         nodes.Clear();
         nodeMap.Clear();
 
-        NavNode[] allNodes = nodesParent != null 
-            ? nodesParent.GetComponentsInChildren<NavNode>(true) 
+        NavNode[] allNodes = nodesParent != null
+            ? nodesParent.GetComponentsInChildren<NavNode>(true)
             : FindObjectsOfType<NavNode>();
-            
+
         HashSet<int> existingIDs = new HashSet<int>();
         foreach (var node in allNodes)
         {
@@ -743,6 +794,66 @@ public class CentralizedNavigationSystem : MonoBehaviour
     }
 
     [ContextMenu("Auto Connect Nodes")]
+    // ========================================
+    // NODE SURFACE SNAPPING
+    // ========================================
+
+    /// <summary>
+    /// Snaps a single NavNode downward onto the road/terrain surface using a raycast.
+    /// Returns true if the raycast hit something on snapLayer.
+    /// </summary>
+    public bool SnapNodeToGround(NavNode node)
+    {
+        if (node == null) return false;
+
+        // Start the ray well above the node so it catches surfaces above AND below the current position
+        Vector3 origin = node.transform.position + Vector3.up * snapRaycastOriginHeight;
+        float maxDistance = snapRaycastOriginHeight + 500f;
+
+        if (Physics.Raycast(origin, Vector3.down, out RaycastHit hit, maxDistance, snapLayer))
+        {
+#if UNITY_EDITOR
+            Undo.RecordObject(node.transform, "Snap Node to Ground");
+#endif
+            node.transform.position = hit.point + Vector3.up * snapNodeHeightOffset;
+
+            if (snapAlignToSurface)
+                node.transform.rotation = Quaternion.FromToRotation(Vector3.up, hit.normal);
+
+#if UNITY_EDITOR
+            EditorUtility.SetDirty(node.gameObject);
+#endif
+            return true;
+        }
+
+        Debug.LogWarning($"[NavSystem] Snap: Node '{node.name}' (ID {node.nodeID}) – no surface hit on snapLayer. " +
+                         $"Check that snapLayer includes your road/terrain layer.");
+        return false;
+    }
+
+    /// <summary>
+    /// Snaps every node in the list down onto the road/terrain surface.
+    /// Fires a downward Physics.Raycast from snapRaycastOriginHeight above each node.
+    /// </summary>
+    [ContextMenu("Snap All Nodes To Ground")]
+    public void SnapAllNodesToGround()
+    {
+        int snapped = 0, missed = 0;
+
+        foreach (var node in nodes)
+        {
+            if (SnapNodeToGround(node)) snapped++;
+            else missed++;
+        }
+
+        Debug.Log($"[NavSystem] Snap complete → {snapped} snapped, {missed} missed. " +
+                  (missed > 0 ? "Check snapLayer assignment for missed nodes." : "All good!"));
+
+#if UNITY_EDITOR
+        EditorUtility.SetDirty(this);
+#endif
+    }
+
     public void AutoConnectNodes()
     {
         connectionDefinitions.Clear();
@@ -846,7 +957,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
 
         ValidateAndRebuildGraph();
         UpdateEditorConnectionsVisualization();
-        
+
         Debug.Log("[NavSystem] Demo setup complete with 6 nodes!");
     }
 
@@ -854,12 +965,12 @@ public class CentralizedNavigationSystem : MonoBehaviour
     public void TestPathZeroToLast()
     {
         if (nodes.Count < 2) return;
-        
+
         int startID = nodes[0].nodeID;
         int endID = nodes[nodes.Count - 1].nodeID;
-        
+
         var path = FindPath(startID, endID);
-        
+
         if (path.Count > 0)
         {
             Debug.Log($"[NavSystem] Path found: {string.Join(" → ", path)}");
@@ -880,7 +991,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
     private void DrawAllConnectionsIntoLineRenderer()
     {
         SetupLineRenderer();
-        
+
         List<Vector3> positions = new List<Vector3>();
 
         foreach (var conn in connectionDefinitions)
@@ -906,7 +1017,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
         Debug.Log("========== NODE MAP DEBUG ==========");
         Debug.Log($"Total nodes: {nodes.Count}");
         Debug.Log($"Total in map: {nodeMap.Count}");
-        
+
         foreach (var node in nodes)
         {
             if (node == null)
@@ -914,7 +1025,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
                 Debug.LogWarning("NULL node found!");
                 continue;
             }
-            
+
             Debug.Log($"Node '{node.name}' | ID: {node.nodeID} | Position: {node.worldPosition}");
         }
         Debug.Log("====================================");
@@ -925,18 +1036,18 @@ public class CentralizedNavigationSystem : MonoBehaviour
     {
         Debug.Log("========== CONNECTION DEBUG ==========");
         Debug.Log($"Total connections: {connectionDefinitions.Count}");
-        
+
         foreach (var conn in connectionDefinitions)
         {
             bool fromExists = nodeMap.ContainsKey(conn.fromNodeID);
             bool toExists = nodeMap.ContainsKey(conn.toNodeID);
-            
+
             string fromName = fromExists ? nodeMap[conn.fromNodeID].name : "INVALID";
             string toName = toExists ? nodeMap[conn.toNodeID].name : "INVALID";
-            
+
             string dir = conn.bidirectional ? "<->" : "->";
             string status = (fromExists && toExists) ? "✓" : "✗";
-            
+
             Debug.Log($"{status} {conn.fromNodeID}({fromName}) {dir} {conn.toNodeID}({toName})");
         }
         Debug.Log("======================================");
@@ -944,9 +1055,101 @@ public class CentralizedNavigationSystem : MonoBehaviour
 #endif
 
     // ========================================
+    // VEHICLE GROUND SURFACE ENUM + CONFIG
+    // ========================================
+
+    /// <summary>
+    /// Describes what surface type the traffic road sits on.
+    /// Drives the groundLayer mask automatically pushed to every spawned vehicle.
+    /// </summary>
+    public enum GroundSurfaceType
+    {
+        Default       = 0,  // Unity built-in Default layer (layer 0)
+        Road          = 1,  // Dedicated "Road" layer — must exist in your project
+        Terrain       = 2,  // Unity Terrain layer
+        RoadAndTerrain = 3, // Both Road + Terrain layers (common in open-world maps)
+        Custom        = 4,  // Use the manual Override Ground Layer mask
+    }
+
+    /// <summary>
+    /// All ground/slope parameters pushed to each TrafficVehicle at spawn.
+    /// Centralises inspector config so you never touch individual vehicle prefabs.
+    /// </summary>
+    [System.Serializable]
+    public struct VehicleGroundConfig
+    {
+        public LayerMask groundLayer;       // Surfaces the vehicle raycasts for grounding
+        public float rideHeight;            // Target height above road surface (metres)
+        public float groundSnapStrength;    // Strength of per-frame Y correction
+        public float slopeTiltSpeed;        // How fast car tilts to match slope normal
+        public float hillClimbBoost;        // Speed multiplier when driving uphill
+    }
+
+    /// <summary>
+    /// Builds a VehicleGroundConfig from inspector fields.
+    /// Called once per spawned vehicle inside SpawnTrafficVehicles().
+    /// </summary>
+    private VehicleGroundConfig BuildVehicleGroundConfig()
+    {
+        LayerMask resolved;
+
+        if (overrideGroundLayer)
+        {
+            resolved = groundLayerOverride;
+        }
+        else
+        {
+            switch (groundSurfaceType)
+            {
+                case GroundSurfaceType.Default:
+                    resolved = LayerMask.GetMask("Default");
+                    break;
+
+                case GroundSurfaceType.Road:
+                    int rl = LayerMask.NameToLayer("Road");
+                    if (rl < 0)
+                    {
+                        Debug.LogWarning("[CentralizedNavSystem] No layer named 'Road' found. " +
+                                         "Falling back to Default. Create a 'Road' layer in your project.");
+                        resolved = LayerMask.GetMask("Default");
+                    }
+                    else { resolved = 1 << rl; }
+                    break;
+
+                case GroundSurfaceType.Terrain:
+                    resolved = LayerMask.GetMask("Terrain");
+                    break;
+
+                case GroundSurfaceType.RoadAndTerrain:
+                    int roadL = LayerMask.NameToLayer("Road");
+                    LayerMask terrainM = LayerMask.GetMask("Terrain");
+                    resolved = (roadL >= 0) ? ((1 << roadL) | terrainM) : terrainM;
+                    break;
+
+                case GroundSurfaceType.Custom:
+                    resolved = groundLayerOverride;
+                    break;
+
+                default:
+                    resolved = groundLayer; // fallback to spawn groundLayer
+                    break;
+            }
+        }
+
+        return new VehicleGroundConfig
+        {
+            groundLayer        = resolved,
+            rideHeight         = vehicleRideHeight,
+            groundSnapStrength = vehicleGroundSnapStrength,
+            slopeTiltSpeed     = vehicleSlopeTiltSpeed,
+            hillClimbBoost     = vehicleHillClimbBoost,
+        };
+    }
+
+    // ========================================
     // PRIORITY QUEUE FOR A* PATHFINDING
     // ========================================
-    
+
     public class PriorityQueue<T>
     {
         private readonly List<(T item, float priority)> elements = new();

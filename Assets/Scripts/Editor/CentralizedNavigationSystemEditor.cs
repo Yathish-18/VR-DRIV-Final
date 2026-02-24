@@ -56,6 +56,12 @@ public class CentralizedNavigationSystemEditor : Editor
         EditorGUILayout.EndFoldoutHeaderGroup();
 
         // ========================================
+        // SNAP NODES TO ROAD SURFACE
+        // ========================================
+        GUILayout.Space(10);
+        DrawSnapToRoadSection(nav);
+
+        // ========================================
         // ORIGINAL BUTTONS
         // ========================================
         GUILayout.Space(10);
@@ -593,6 +599,126 @@ public class CentralizedNavigationSystemEditor : Editor
         {
             Debug.LogWarning($"[NavSystem] Node {nodeID} does not exist!");
         }
+    }
+    // ========================================
+    // SNAP NODES TO ROAD SURFACE
+    // ========================================
+    private bool showSnapPanel = true;
+
+    private void DrawSnapToRoadSection(CentralizedNavigationSystem nav)
+    {
+        GUI.backgroundColor = new Color(0.55f, 0.9f, 0.55f);
+        showSnapPanel = EditorGUILayout.BeginFoldoutHeaderGroup(showSnapPanel, "🏔️  SNAP NODES TO ROAD SURFACE");
+        GUI.backgroundColor = Color.white;
+
+        if (!showSnapPanel)
+        {
+            EditorGUILayout.EndFoldoutHeaderGroup();
+            return;
+        }
+
+        GUIStyle boxStyle = new GUIStyle(GUI.skin.box);
+        boxStyle.padding = new RectOffset(10, 10, 10, 10);
+
+        EditorGUILayout.BeginVertical(boxStyle);
+
+        // Info box
+        EditorGUILayout.HelpBox(
+            "Fires a downward raycast from above each node and places it exactly on the road/terrain surface.\n" +
+            "Perfect for hills, slopes and uneven terrain where manual placement is hard.\n\n" +
+            "1. Set 'Snap Layer' to your Road + Terrain layers.\n" +
+            "2. Increase 'Raycast Origin Height' if your hills are very tall.\n" +
+            "3. Use 'Align To Surface' for sloped roads so nodes tilt with the road.",
+            MessageType.Info);
+
+        GUILayout.Space(6);
+
+        // ── Snap Layer ──────────────────────────────────────────────────────────
+        SerializedObject so = new SerializedObject(nav);
+        so.Update();
+
+        SerializedProperty snapLayerProp   = so.FindProperty("snapLayer");
+        SerializedProperty snapHeightProp  = so.FindProperty("snapRaycastOriginHeight");
+        SerializedProperty snapOffsetProp  = so.FindProperty("snapNodeHeightOffset");
+        SerializedProperty snapAlignProp   = so.FindProperty("snapAlignToSurface");
+        SerializedProperty autoSnapProp    = so.FindProperty("autoSnapNewNodes");
+
+        EditorGUILayout.PropertyField(snapLayerProp,  new GUIContent("Snap Layer",
+            "Layers considered as road/terrain surface. Set to your Road + Terrain layers."));
+        EditorGUILayout.PropertyField(snapHeightProp, new GUIContent("Raycast Origin Height",
+            "How many units above the node to start the downward ray. Raise this for tall hills."));
+        EditorGUILayout.PropertyField(snapOffsetProp, new GUIContent("Surface Height Offset",
+            "Small Y offset after landing on surface (prevents nodes clipping into mesh)."));
+        EditorGUILayout.PropertyField(snapAlignProp,  new GUIContent("Align To Surface Normal",
+            "Tilts the node to match the slope of the road. Useful for banked roads."));
+
+        GUILayout.Space(4);
+        EditorGUILayout.PropertyField(autoSnapProp, new GUIContent("Auto-Snap New Nodes",
+            "Automatically snap every newly created node to ground on creation."));
+
+        so.ApplyModifiedProperties();
+
+        GUILayout.Space(8);
+
+        // ── Snap All Button ─────────────────────────────────────────────────────
+        GUI.backgroundColor = new Color(0.3f, 0.9f, 0.3f);
+        GUIStyle bigBtn = new GUIStyle(GUI.skin.button);
+        bigBtn.fontSize    = 13;
+        bigBtn.fontStyle   = FontStyle.Bold;
+        bigBtn.fixedHeight = 42;
+
+        if (GUILayout.Button("📍  SNAP ALL NODES TO ROAD SURFACE", bigBtn))
+        {
+            if (nav.nodes.Count == 0)
+            {
+                EditorUtility.DisplayDialog("No Nodes", "There are no NavNodes in the system yet.", "OK");
+            }
+            else if (EditorUtility.DisplayDialog(
+                "Snap All Nodes",
+                $"Raycast {nav.nodes.Count} node(s) downward onto the surface?\n\n" +
+                "This is undoable (Edit → Undo).",
+                "Snap!",
+                "Cancel"))
+            {
+                Undo.SetCurrentGroupName("Snap All Nodes To Ground");
+                int undoGroup = Undo.GetCurrentGroup();
+
+                nav.SnapAllNodesToGround();
+
+                Undo.CollapseUndoOperations(undoGroup);
+                SceneView.RepaintAll();
+            }
+        }
+        GUI.backgroundColor = Color.white;
+
+        GUILayout.Space(4);
+
+        // ── Snap Selected Node Only ─────────────────────────────────────────────
+        GUI.backgroundColor = new Color(0.7f, 1f, 0.7f);
+        if (GUILayout.Button("📍  Snap SELECTED Node Only", GUILayout.Height(30)))
+        {
+            NavNode selected = Selection.activeGameObject?.GetComponent<NavNode>();
+            if (selected == null || selected.parentNavSystem != nav)
+            {
+                EditorUtility.DisplayDialog("No NavNode Selected",
+                    "Select a NavNode GameObject in the Hierarchy first.", "OK");
+            }
+            else
+            {
+                Undo.SetCurrentGroupName("Snap Node To Ground");
+                int undoGroup = Undo.GetCurrentGroup();
+
+                bool hit = nav.SnapNodeToGround(selected);
+                Undo.CollapseUndoOperations(undoGroup);
+
+                if (hit) Debug.Log($"[NavSystem] Snapped '{selected.name}' to ground.");
+                SceneView.RepaintAll();
+            }
+        }
+        GUI.backgroundColor = Color.white;
+
+        EditorGUILayout.EndVertical();
+        EditorGUILayout.EndFoldoutHeaderGroup();
     }
 }
 #endif
