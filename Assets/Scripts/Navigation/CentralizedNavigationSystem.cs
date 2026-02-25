@@ -43,6 +43,11 @@ public class CentralizedNavigationSystem : MonoBehaviour
     [SerializeField] private float stoppingDistance = 8f;
     [SerializeField] private float detectionRange = 15f;
     [SerializeField] private LayerMask obstacleLayer;
+
+    [Tooltip("All layers that count as a road vehicle — NPC cars, player car, anything you want NPCs to avoid.\n" +
+             "Add every vehicle layer here. This is pushed to all spawned NPC cars so they brake for each other AND the player.\n" +
+             "If left as Nothing (0), NPCs fall back to obstacleLayer for vehicle detection.")]
+    [SerializeField] private LayerMask vehicleLayerMask = 0;
     [SerializeField] private bool showDebugGizmos = true;
     [SerializeField] private float vehicleSpacing = 15f;
 
@@ -549,7 +554,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
 
             float speed = vehicleSpeed * UnityEngine.Random.Range(0.85f, 1.15f);
             VehicleGroundConfig groundConfig = BuildVehicleGroundConfig();
-            traffic.Initialize(this, nodeID, speed, stoppingDistance, detectionRange, obstacleLayer, groundConfig);
+            traffic.Initialize(this, nodeID, speed, stoppingDistance, detectionRange, obstacleLayer, groundConfig, vehicleLayerMask);
 
             // Release kinematic after physics settles
             StartCoroutine(ReleaseKinematicNextFrame(rb));
@@ -1084,6 +1089,8 @@ public class CentralizedNavigationSystem : MonoBehaviour
         public float slopeTiltSpeed;        // How fast car tilts to match slope normal
         public float hillClimbBoost;        // Speed multiplier when driving uphill
     }
+
+
 
     /// <summary>
     /// Builds a VehicleGroundConfig from inspector fields.
