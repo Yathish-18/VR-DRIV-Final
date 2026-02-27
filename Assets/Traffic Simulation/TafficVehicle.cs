@@ -1,11 +1,55 @@
-﻿// TRAFFIC VEHICLE - DESTINATION-BASED NAVIGATION WITH TRAFFIC LIGHT COMPLIANCE
-// Fixed: NPC cars now detect and stop for the player car (no more running-over)
-// Fixed: Wheels now rotate (WheelCollider support + visual-only fallback)
-// Fixed: Hill climbing, slope detection, obstacle detection on slopes, stuck detection on hills
+﻿// ============================================================================
+//  TRAFFIC VEHICLE  ·  v5.1  —  FIXED WHEEL STEER (EULER CORRUPTION)
+//
+//  FIXES vs v5.0:
+//  ─────────────────────────────────────────────────────────────────────────
+//  BUG 1 — "Truck cab front shrinks / collapses at runtime"
+//  ROOT CAUSE:
+//    SpinWheel() was writing:
+//        wheel.parent.localEulerAngles.y = steerDeg;
+//    When the WheelController parent has ANY non-zero X or Z local rotation
+//    baked in (camber, caster, toe — very common on truck rigs), Unity's
+//    euler → quaternion round-trip silently zeros those axes, collapsing
+//    the mesh geometry.  Cars work fine because their wheel pivots are flat.
+//  FIX:
+//    Cache each steer-pivot's ORIGINAL localRotation at Initialize() time
+//    (CacheWheelRestRotations).  Each frame compose steer as:
+//        steerPivot.localRotation = _restRot * Quaternion.AngleAxis(deg, up)
+//    Pure quaternion — no euler read-back, no axis corruption.
+//
+//  BUG 2 — "Truck wheels sit below the road surface"
+//  ROOT CAUSE:
+//    The wheelFL/FR/RL/RR fields were typically assigned to the LEAF mesh
+//    transform (e.g. "Whl HD FL") rather than the "Rotating" mid-transform.
+//    Two consequences:
+//      a) wheel.parent pointed to "Rotating" → steer went to wrong pivot.
+//      b) Ground ray origin = mesh_position + up*(wheelRadius*0.6).
+//         Mesh pivot is at the wheel centre, but if the assigned transform
+//         is the visual mesh (which may sit AT ground level), the ray starts
+//         below road and always misses.
+//  FIX:
+//    Added explicit "Steer Pivot" references (wheelFL_Steer etc.) so the
+//    user can wire the WheelController transform for steer independently
+//    from the spin/ray transform.  If left null, falls back to wheel.parent
+//    (original v5.0 behaviour).
+//    Also added groundRayLocalOffset so users can nudge ray origin per prefab.
+//
+//  WHEEL ASSIGNMENT GUIDE (truck example):
+//    Hierarchy:  Wheels / Whl HD FL_WheelController / Rotating / Whl HD FL
+//
+//    wheelFL            → "Rotating"          (spin target + ray origin)
+//    wheelFL_Steer      → "Whl HD FL_WheelController"  (steer pivot)
+//    wheelRadius        → 0.55–0.65 for trucks (affects spin speed + ray)
+//    groundRayLocalOffset → 0.0 (usually fine when wheelFL = Rotating)
+//
+//  For simple car rigs where there is no separate steer pivot object, leave
+//  wheelFL_Steer empty — it will fall back to wheel.parent as before, but
+//  now uses safe quaternion steer so no corruption occurs.
+// ============================================================================
 
 using UnityEngine;
+using UnityEngine.AI;
 using System.Collections.Generic;
-using System.Linq;
 
 #if UNITY_EDITOR
 using UnityEditor;
@@ -14,1164 +58,1174 @@ using UnityEditor;
 [RequireComponent(typeof(Rigidbody))]
 public class TrafficVehicle : MonoBehaviour
 {
-    private CentralizedNavigationSystem navSystem;
+    // =========================================================================
+    //  RUNTIME CONFIG
+    // =========================================================================
+
+    [Header("═══  RUNTIME REF (read-only)  ═══")]
+    [SerializeField] private CentralizedNavigationSystem navSystem;
     private Rigidbody rb;
-    private Transform targetWaypoint;
 
-    // Movement settings
-    private float maxSpeed = 12f;
-    private float acceleration = 5f;
-    private float turnSpeed = 3f;
-    private float stoppingDistance = 8f;
-    private float detectionRange = 15f;
-    private LayerMask obstacleLayer;
+    [Header("═══  RUNTIME — MOVEMENT  ═══")]
+    [SerializeField] private float maxSpeed;
+    [SerializeField] private float turnSpeed;
+    [SerializeField] private float speedSmoothTime;
 
-    // SAVED ROUTE DATA
-    [Header("=== SAVED ROUTE DATA ===")]
-    [SerializeField] private int sourceNodeID = -1;
-    [SerializeField] private int destinationNodeID = -1;
-    [SerializeField] private List<int> savedRoutePath = new List<int>();
-    [SerializeField] private int currentPathIndex = 0;
+    [Header("═══  RUNTIME — WAYPOINT REACH  ═══")]
+    [SerializeField] private float waypointReachDistanceXZ;
+    [SerializeField] private float waypointReachDistanceY;
+    [SerializeField] private float minAdvanceInterval;
 
-    // Path constraints
-    [Header("=== PATH SETTINGS ===")]
-    [Tooltip("Minimum nodes in a path (including source). 2 = at least one real step. " +
-             "Set higher only on large maps with many nodes.")]
-    [SerializeField] private int minPathLength = 2;
-    [SerializeField] private int maxPathLength = 50;
-    [Tooltip("Minimum straight-line distance to destination. " +
-             "Lowered automatically if no destination found at this range.")]
-    [SerializeField] private float minDestinationDistance = 30f;
-    [SerializeField] private float maxDestinationDistance = 500f;
-    [Tooltip("Attempts to find a valid path before giving up and using fallback.")]
-    [SerializeField] private int maxPathAttempts = 10;
+    [Header("═══  RUNTIME — DETECTION  ═══")]
+    [SerializeField] private LayerMask detectionLayerMask;
+    [SerializeField] private LayerMask npcVehicleLayer;
+    [SerializeField] private LayerMask playerVehicleLayer;
+    [SerializeField] private LayerMask trafficLightLayer;
+    [SerializeField] private float     detectionRange;
+    [SerializeField] private float     vehicleStoppingDistance;
+    [SerializeField] private float     obstacleStoppingDistance;
+    [SerializeField] private float     trafficLightStopDistance;
+    [SerializeField] private float     maxRedLightWaitTime;
 
-    // Movement state
-    private int currentNodeID = -1;
-    private float currentSpeed = 0f;
-    private bool isStopped = false;
-    private Vector3 lastValidPosition;
-    private float waypointReachDistance = 5f;
-    private int stuckCounter = 0;
-    private const int MAX_STUCK_FRAMES = 180;
-    private int pathRecalculations = 0;
-    private const int MAX_RECALCULATIONS = 3;
+    [Header("═══  RUNTIME — GROUND & SLOPE  ═══")]
+    [SerializeField] private LayerMask groundLayer;
 
-    // ===================================================
-    // HILL / SLOPE SETTINGS
-    // ===================================================
-    [Header("=== HILL / SLOPE SETTINGS ===")]
-    [Tooltip("Layers considered road/terrain surface for ground-snap raycasts.")]
-    [SerializeField] private LayerMask groundLayer = ~0;
-    [SerializeField] private float groundRayUpOffset = 3f;
+    [Tooltip("How far UP from car pivot the centre-body fallback ray starts.\n" +
+             "Keep at 1.5–3.0 m so it clears any bottom colliders.")]
+    [SerializeField] private float groundRayUpOffset = 2f;
+
+    [Tooltip("Total downward reach of the centre-body fallback ray.\n" +
+             "Set to vehicle half-height + 3 m margin. 5–10 m for trucks.")]
     [SerializeField] private float groundRayDistance = 8f;
-    [SerializeField] private float rideHeight = 0.5f;
-    [SerializeField] private float groundSnapStrength = 8f;
-    [SerializeField] private float slopeTiltSpeed = 5f;
-    [SerializeField] private float hillClimbBoost = 1.4f;
-    [SerializeField] private float waypointReachDistanceXZ = 5f;
-    [SerializeField] private float waypointReachDistanceY = 4f;
 
-    private bool isGrounded = false;
-    private Vector3 groundNormal = Vector3.up;
-    private float currentGroundY = 0f;
+    [Tooltip("Target height above road surface. 0.3–0.6 m typical.")]
+    [SerializeField] private float rideHeight = 0.4f;
 
-    // ===================================================
-    // VEHICLE LAYER MASK (set by NavSystem on spawn)
-    // Covers ALL vehicle layers — NPC cars, player car, any road vehicle.
-    // Set once in CentralizedNavigationSystem → Vehicle Layers.
-    // ===================================================
-    [Header("=== VEHICLE LAYERS (set by NavSystem on spawn) ===")]
-    [Tooltip("All layers that count as a vehicle (NPC + player). Set in CentralizedNavigationSystem.")]
-    [SerializeField] private LayerMask vehicleLayerMask = 0;
+    [Tooltip("Y snap speed. 12–16 recommended. Low values cause floating.")]
+    [SerializeField] private float groundSnapStrength = 14f;
 
-    // ===================================================
-    // WHEEL ROTATION  (FIX #2)
-    // ===================================================
-    [Header("=== WHEEL ROTATION ===")]
-    [Tooltip("WheelColliders on this vehicle (preferred method). " +
-             "The script drives them and syncs visual meshes automatically. " +
-             "Leave empty to use visual-only rotation instead.")]
-    [SerializeField] private WheelCollider[] wheelColliders = new WheelCollider[0];
+    [Tooltip("Body tilt speed toward road normal. 10–15 recommended.")]
+    [SerializeField] private float slopeTiltSpeed = 12f;
 
-    [Tooltip("Visual mesh transforms matching each WheelCollider (same array order). " +
-             "Their position & rotation are synced from the WheelCollider every frame.")]
-    [SerializeField] private Transform[] wheelMeshes = new Transform[0];
+    [SerializeField] private float hillClimbBoost;
 
-    [Space]
-    [Tooltip("For car models WITHOUT WheelColliders: assign wheel transforms here directly. " +
-             "They spin around visualWheelSpinAxis based on current vehicle speed. " +
-             "The script also tries to auto-detect these by searching for transforms " +
-             "whose name contains 'wheel', 'tyre', or 'tire'.")]
-    [SerializeField] private Transform[] visualOnlyWheels = new Transform[0];
+    [Header("═══  RUNTIME — STUCK DETECTION  ═══")]
+    [SerializeField] private int   maxStuckFrames;
+    [SerializeField] private float stuckMovementThreshold;
+    [SerializeField] private int   maxPathRecalculations;
 
-    [Tooltip("Wheel radius used for visual-only spin calculation (metres). " +
-             "Match your actual wheel size — usually 0.30–0.45 for cars.")]
-    [SerializeField] private float visualWheelRadius = 0.35f;
+    [Header("═══  RUNTIME — DEBUG  ═══")]
+    [SerializeField] public bool  showDebugRays;
+    [SerializeField] private bool showDebugGizmos;
 
-    [Tooltip("Local axis the visual-only wheels rotate around. Usually Vector3.right (X-axis). " +
-             "Change to Vector3.left if wheels spin backwards.")]
-    [SerializeField] private Vector3 visualWheelSpinAxis = Vector3.right;
+    // =========================================================================
+    //  MODEL-SPECIFIC
+    // =========================================================================
 
-    // ===================================================
-    // TRAFFIC LIGHT DETECTION
-    // ===================================================
-    [Header("=== TRAFFIC LIGHT DETECTION ===")]
-    [SerializeField] private float trafficLightDetectionRange = 5f;
-    [SerializeField] private float trafficLightStoppingDistance = 7f;
-    [SerializeField] private float violationColliderBuffer = 3f;
-    [SerializeField] private float maxRedLightWaitTime = 20f;
-    [SerializeField] private LayerMask trafficLightLayerMask = -1;
-    [SerializeField] private bool enableTrafficLightCompliance = true;
+    [Header("═══  MODEL-SPECIFIC (set per prefab)  ═══")]
+    [Tooltip("Wheel radius in metres.\n" +
+             "Cars: ~0.33–0.40 m.  Trucks/buses: ~0.50–0.65 m.\n" +
+             "Controls both visual spin speed and ground-ray origin height.")]
+    [SerializeField] private float wheelRadius = 0.4f;
 
-    private EnhancedTrafficLightViolationDetector currentTrafficLight = null;
-    private bool isInTrafficLightZone = false;
-    private bool isStoppedAtRedLight = false;
-    private float timeEnteredRedLightZone = 0f;
-    private Vector3 redLightStopPosition = Vector3.zero;
-    private bool hasReachedStopPosition = false;
+    // ── Wheel Spin Transforms ─────────────────────────────────────────────────
+    [Header("═══  WHEEL SPIN TRANSFORMS  (ground ray origins)  ═══")]
+    [Tooltip("Assign the SPINNING transform (e.g. 'Rotating' child of the WheelController).\n" +
+             "The ground ray fires from this position + up*(wheelRadius*0.6).\n" +
+             "Do NOT assign the leaf mesh or the WheelController pivot here.")]
+    [SerializeField] private Transform wheelFL;
+    [SerializeField] private Transform wheelFR;
+    [SerializeField] private Transform wheelRL;
+    [SerializeField] private Transform wheelRR;
 
-    // ===================================================
-    // VEHICLE-AHEAD DETECTION
-    // ===================================================
-    [Header("=== VEHICLE AHEAD DETECTION ===")]
-    [SerializeField] private float vehicleDetectionRange = 20f;
-    [SerializeField] private float vehicleStoppingDistance = 10f;
-    [SerializeField] private float lateralDetectionWidth = 2.5f;
-    [SerializeField] private int multiRayCount = 3;
-    [SerializeField] private bool enableVehicleAheadDetection = true;
+    // ── Wheel Steer Pivots ────────────────────────────────────────────────────
+    [Header("═══  WHEEL STEER PIVOTS  (optional — for deep hierarchies)  ═══")]
+    [Tooltip("OPTIONAL. Assign the WheelController / steer pivot transform for each\n" +
+             "FRONT wheel separately from the spin transform above.\n\n" +
+             "Example truck hierarchy:\n" +
+             "  Wheels / Whl HD FL_WheelController / Rotating / Whl HD FL\n" +
+             "  → wheelFL       = 'Rotating'               (spin + ray)\n" +
+             "  → wheelFL_Steer = 'Whl HD FL_WheelController' (steer)\n\n" +
+             "If left empty, falls back to wheel.parent (simple car rigs).\n" +
+             "Rear wheels never steer so no steer pivot needed for RL/RR.")]
+    [SerializeField] private Transform wheelFL_Steer;
+    [SerializeField] private Transform wheelFR_Steer;
 
-    private GameObject detectedVehicleAhead = null;
-    private float distanceToVehicleAhead = 0f;
+    [Tooltip("Local spin axis. Usually Vector3.right (1,0,0).")]
+    [SerializeField] private Vector3 wheelSpinAxis = Vector3.right;
 
-    // ===================================================
-    // DEBUG INFO (READ ONLY)
-    // ===================================================
-    [Header("=== DEBUG INFO (READ ONLY) ===")]
-    [SerializeField] private string debugRouteName = "";
-    [SerializeField] private int debugPathProgress = 0;
-    [SerializeField] private int debugTotalNodes = 0;
-    [SerializeField] private float debugProgressPercent = 0f;
-    [SerializeField] private float debugDistanceToDestination = 0f;
-    [SerializeField] private float debugCurrentSpeed = 0f;
-    [SerializeField] private float debugDistanceToWaypoint = 0f;
-    [SerializeField] private bool debugIsStuck = false;
-    [SerializeField] private bool debugIsObstacleDetected = false;
-    [SerializeField] private string debugSavedRoute = "";
-    [SerializeField] private string debugNextNodes = "";
-    [SerializeField] private bool showDebugGizmos = true;
-    [SerializeField] private bool debugAtRedLight = false;
-    [SerializeField] private string debugTrafficLightID = "None";
-    [SerializeField] private string debugTrafficLightState = "None";
-    [SerializeField] private float debugDistanceToTrafficLight = 0f;
-    [SerializeField] private bool debugVehicleAheadDetected = false;
-    [SerializeField] private float debugDistanceToVehicleAhead = 0f;
-    [SerializeField] private bool debugIsGrounded = false;
-    [SerializeField] private float debugSlopeAngle = 0f;
-    [SerializeField] private float debugGroundY = 0f;
-    [SerializeField] private int debugWheelCollidersFound = 0;
-    [SerializeField] private int debugVisualWheelsFound = 0;
+    [Tooltip("Max front wheel visual steer angle (degrees).")]
+    [SerializeField] private float maxSteerAngle = 30f;
 
-    private Color debugColor = Color.green;
-    private float targetSpeed = 0f;
-    private float speedSmoothVelocity = 0f;
-    private float speedSmoothTime = 0.3f;
-    private float angleToCurrentWaypoint = 0f;
-    private float lastAdvanceTime = -999f;
-    private const float MIN_ADVANCE_INTERVAL = 0.15f;
+    // ── Cached rest rotations for steer pivots (set in CacheWheelRestRotations) ─
+    // These preserve the prefab's baked-in camber/caster/toe angles.
+    // Steer is composed as:  pivot.localRotation = _restRot * YawOffset
+    // This is safe for any pivot orientation — no euler read-back corruption.
+    private Quaternion _restFL = Quaternion.identity;
+    private Quaternion _restFR = Quaternion.identity;
 
-    // ===================================================
-    // INITIALIZE
-    // ===================================================
+    // =========================================================================
+    //  GROUND SAMPLING CONFIG
+    // =========================================================================
 
-    public void Initialize(CentralizedNavigationSystem navSys, int startNodeID, float speed,
-                           float stopDist, float detectRange, LayerMask obstacles,
-                           CentralizedNavigationSystem.VehicleGroundConfig groundConfig = default,
-                           LayerMask vehicleLayers = default)
+    [Header("═══  GROUND SAMPLING  ═══")]
+    [Tooltip("Downward ray distance from each wheel origin.\n" +
+             "For trucks/buses set 1.5–2.5 m. For cars 0.8–1.2 m.")]
+    [SerializeField] private float wheelRayDistance = 2.0f;
+
+    // ── Per-wheel hit cache ───────────────────────────────────────────────────
+    private bool    _wFL_hit, _wFR_hit, _wRL_hit, _wRR_hit;
+    private Vector3 _wFL_pt,  _wFR_pt,  _wRL_pt,  _wRR_pt;
+    private int     _wheelHitCount = 0;
+
+    // =========================================================================
+    //  NAVMESH ROAD CLAMPING
+    // =========================================================================
+
+    [Header("═══  NAVMESH ROAD CLAMPING  ═══")]
+    [SerializeField] private float navMeshSampleRadius = 4f;
+    [SerializeField] private int   navMeshAreaMask     = NavMesh.AllAreas;
+
+    // =========================================================================
+    //  ROUTE STATE
+    // =========================================================================
+
+    [Header("═══  ROUTE  (read-only)  ═══")]
+    [SerializeField] private int sourceNodeID      = -1;
+    [SerializeField] private int destinationNodeID = -1;
+    [SerializeField] private int currentNodeID     = -1;
+
+    private List<Vector3> denseWaypoints = new List<Vector3>();
+    private int           waypointIndex  = 0;
+    private Vector3       currentTarget;
+    private bool          hasTarget      = false;
+
+    // =========================================================================
+    //  MOVEMENT STATE
+    // =========================================================================
+
+    private float   currentSpeed           = 0f;
+    private float   speedSmoothVelocity    = 0f;
+    private float   targetSpeed            = 0f;
+    public  bool    isStopped              = false;
+    private float   angleToCurrentWaypoint = 0f;
+    private float   currentSteerAngle      = 0f;
+
+    private Vector3 lastValidPosition;
+    private int     stuckCounter       = 0;
+    private bool    isStuck            = false;
+    private int     pathRecalculations = 0;
+    private float   lastAdvanceTime    = -999f;
+    private bool    _advancedThisFrame = false;
+
+    // Ground state
+    private bool    isGrounded     = false;
+    private Vector3 groundNormal   = Vector3.up;
+    private float   currentGroundY = 0f;
+    private Vector3 groundHitPoint = Vector3.zero;
+
+    // Tilt
+    private Quaternion _smoothedSlopeTilt = Quaternion.identity;
+
+    // =========================================================================
+    //  DETECTION STATE
+    // =========================================================================
+
+    private enum HitType { None, NpcVehicle, PlayerVehicle, TrafficLight, Obstacle }
+
+    private HitType    _hitType     = HitType.None;
+    private float      _hitDistance = 0f;
+    private GameObject _hitObject   = null;
+
+    private TrafficLightController _currentLight      = null;
+    private bool                   _stoppedAtRed      = false;
+    private float                  _redLightEntryTime = 0f;
+
+    // =========================================================================
+    //  DEBUG INSPECTOR
+    // =========================================================================
+
+    [Header("═══  DEBUG INFO (read-only)  ═══")]
+    [SerializeField] private string  debugChainName           = "";
+    [SerializeField] private int     debugCurrentWaypoint     = 0;
+    [SerializeField] private int     debugNextWaypointIndex   = 0;
+    [SerializeField] private int     debugCurrentNodeID       = -1;
+    [SerializeField] private int     debugNextNodeID          = -1;
+    [SerializeField] private int     debugTotalWaypoints      = 0;
+    [SerializeField] private float   debugProgressPct         = 0f;
+    [SerializeField] private float   debugDistToDest          = 0f;
+    [SerializeField] private float   debugCurrentSpeed        = 0f;
+    [SerializeField] private float   debugDistanceToWaypoint  = 0f;
+    [SerializeField] private bool    debugIsStuck             = false;
+    [SerializeField] private bool    debugIsObstacleDetected  = false;
+    [SerializeField] private Vector3 debugTargetPosition      = Vector3.zero;
+    [SerializeField] private Vector3 debugSpawnPosition       = Vector3.zero;
+    [SerializeField] private string  debugHitType             = "None";
+    [SerializeField] private float   debugHitDist             = 0f;
+    [SerializeField] private string  debugLightState          = "None";
+    [SerializeField] private bool    debugGrounded            = false;
+    [SerializeField] private float   debugSlopeAngle          = 0f;
+    [SerializeField] private float   debugGroundY             = 0f;
+    [SerializeField] private string  debugGroundSource        = "None";
+    [SerializeField] private int     debugWheelHits           = 0;
+
+    private Color _gizmoColor = Color.green;
+
+    // =========================================================================
+    //  INITIALIZE
+    // =========================================================================
+
+    public void Initialize(CentralizedNavigationSystem navSys,
+                           int startNodeID,
+                           CentralizedNavigationSystem.VehicleGroundConfig groundCfg,
+                           CentralizedNavigationSystem.VehicleSharedConfig sharedCfg)
     {
-        navSystem        = navSys;
-        maxSpeed         = speed;
-        stoppingDistance = stopDist;
-        detectionRange   = detectRange;
-        obstacleLayer    = obstacles;
+        navSystem = navSys;
 
-        // Apply generic vehicle layer mask from CentralizedNavigationSystem.
-        // Covers NPC cars + player car + any other road vehicle — purely layer-based, no tags needed.
-        if (vehicleLayers.value != 0)
-            vehicleLayerMask = vehicleLayers;
+        // Ground config
+        groundLayer        = groundCfg.groundLayer;
+        groundRayUpOffset  = groundCfg.groundRayUpOffset;
+        groundRayDistance  = groundCfg.groundRayDistance;
+        rideHeight         = groundCfg.rideHeight;
+        groundSnapStrength = groundCfg.groundSnapStrength;
+        slopeTiltSpeed     = groundCfg.slopeTiltSpeed;
+        hillClimbBoost     = groundCfg.hillClimbBoost;
 
-        // Apply centralised ground/slope config
-        if (groundConfig.groundLayer != 0)
-        {
-            groundLayer        = groundConfig.groundLayer;
-            rideHeight         = groundConfig.rideHeight;
-            groundSnapStrength = groundConfig.groundSnapStrength;
-            slopeTiltSpeed     = groundConfig.slopeTiltSpeed;
-            hillClimbBoost     = groundConfig.hillClimbBoost;
-        }
+        // Movement
+        maxSpeed        = sharedCfg.speed * UnityEngine.Random.Range(0.85f, 1.15f);
+        turnSpeed       = sharedCfg.turnSpeed;
+        speedSmoothTime = sharedCfg.speedSmoothTime;
 
-        rb = GetComponent<Rigidbody>();
-        if (rb == null) rb = gameObject.AddComponent<Rigidbody>();
+        // Waypoint
+        waypointReachDistanceXZ = sharedCfg.waypointReachDistanceXZ;
+        waypointReachDistanceY  = sharedCfg.waypointReachDistanceY;
+        minAdvanceInterval      = sharedCfg.minAdvanceInterval;
 
-        rb.mass           = 1200f;
-        rb.linearDamping  = 1f;
-        rb.angularDamping = 10f;
-        rb.interpolation  = RigidbodyInterpolation.Interpolate;
-        rb.constraints    = RigidbodyConstraints.None;
+        // Detection
+        detectionLayerMask       = sharedCfg.detectionLayerMask;
+        npcVehicleLayer          = sharedCfg.npcVehicleLayer;
+        playerVehicleLayer       = sharedCfg.playerVehicleLayer;
+        trafficLightLayer        = sharedCfg.trafficLightLayer;
+        detectionRange           = sharedCfg.detectionRange;
+        vehicleStoppingDistance  = sharedCfg.vehicleStoppingDistance;
+        obstacleStoppingDistance = sharedCfg.obstacleStoppingDistance;
+        trafficLightStopDistance = sharedCfg.trafficLightStopDistance;
+        maxRedLightWaitTime      = sharedCfg.maxRedLightWaitTime;
 
-        maxSpeed     *= Random.Range(0.85f, 1.15f);
-        acceleration  = maxSpeed * 1.5f;
-        turnSpeed     = maxSpeed * 0.3f;
+        // Stuck
+        maxStuckFrames         = sharedCfg.maxStuckFrames;
+        stuckMovementThreshold = sharedCfg.stuckMovementThreshold;
+        maxPathRecalculations  = sharedCfg.maxPathRecalculations;
 
-        lastValidPosition = transform.position;
-        rb.position       = transform.position;
+        showDebugGizmos = sharedCfg.showDebugGizmos;
 
-        if (startNodeID != -1 && navSystem.nodeMap.ContainsKey(startNodeID))
-        {
-            sourceNodeID  = startNodeID;
-            currentNodeID = startNodeID;
-        }
-        else
-        {
-            sourceNodeID  = navSystem.GetRandomNode();
-            currentNodeID = sourceNodeID;
-        }
+        // ── Rigidbody ─────────────────────────────────────────────────────────
+        rb = GetComponent<Rigidbody>() ?? gameObject.AddComponent<Rigidbody>();
+        rb.mass            = 1200f;
+        rb.linearDamping   = 4f;
+        rb.angularDamping  = 10f;
+        rb.interpolation   = RigidbodyInterpolation.Interpolate;
+        rb.useGravity      = false;
+        rb.constraints     = RigidbodyConstraints.None;
 
-        debugColor = new Color(Random.value, Random.value, Random.value);
+        // ── Node anchor ───────────────────────────────────────────────────────
+        sourceNodeID      = navSystem.nodeMap.ContainsKey(startNodeID)
+                              ? startNodeID : navSystem.GetRandomNode();
+        currentNodeID     = sourceNodeID;
+        destinationNodeID = -1;
 
-        AutoDetectWheels();
-        PickNewDestinationAndSaveRoute();
+        lastValidPosition  = transform.position;
+        debugSpawnPosition = transform.position;
 
-        Debug.Log($"[{gameObject.name}] Init | Node:{sourceNodeID} | Speed:{maxSpeed:F1} m/s | " +
-                  $"WheelColliders:{wheelColliders.Length} | VisualWheels:{visualOnlyWheels.Length} | " +
-                  $"VehicleLayerMask:{vehicleLayerMask.value}");
+        _gizmoColor        = new Color(UnityEngine.Random.value,
+                                       UnityEngine.Random.value,
+                                       UnityEngine.Random.value);
+        _smoothedSlopeTilt = transform.rotation;
+
+        // ── Cache steer pivot rest rotations BEFORE anything moves ────────────
+        // Must happen AFTER Instantiate (so prefab-baked rotations are intact)
+        // and BEFORE FixedUpdate starts rotating anything.
+        CacheWheelRestRotations();
+
+        Debug.Log($"[{gameObject.name}] Initialized | Node={sourceNodeID} " +
+                  $"Speed={maxSpeed:F1} m/s | WheelRefs: " +
+                  $"FL={wheelFL != null} FR={wheelFR != null} " +
+                  $"RL={wheelRL != null} RR={wheelRR != null} | " +
+                  $"SteerPivots: FL={wheelFL_Steer != null} FR={wheelFR_Steer != null}");
+
+        PickNewDestinationAndBuildRoute();
     }
 
-    // ===================================================
-    // WHEEL AUTO-DETECTION
-    // ===================================================
+    // =========================================================================
+    //  CACHE WHEEL REST ROTATIONS
+    //
+    //  Snapshot the steer pivot's localRotation the moment the prefab is live.
+    //  This preserves any camber / caster / toe baked into the prefab.
+    //  Every frame we then compose:
+    //      pivot.localRotation = _restRot * Quaternion.AngleAxis(steerDeg, Vector3.up)
+    //  instead of the old, broken:
+    //      pivot.localEulerAngles.y = steerDeg   ← corrupts X/Z
+    // =========================================================================
 
-    /// <summary>
-    /// If wheels were not assigned in the inspector, tries to find them automatically.
-    /// WheelColliders are preferred; falls back to name-matching transforms.
-    /// Called once inside Initialize — zero overhead at runtime.
-    /// </summary>
-    private void AutoDetectWheels()
+    private void CacheWheelRestRotations()
     {
-        // ── WheelCollider path ──
-        if (wheelColliders == null || wheelColliders.Length == 0)
-        {
-            WheelCollider[] found = GetComponentsInChildren<WheelCollider>(true);
-            if (found.Length > 0)
-            {
-                wheelColliders = found;
-                Debug.Log($"[{gameObject.name}] Auto-detected {found.Length} WheelColliders.");
-            }
-        }
+        // For each front wheel, the steer pivot is:
+        //   (a) the explicit wheelFL_Steer transform if assigned, OR
+        //   (b) wheelFL.parent as before (simple car rigs)
+        Transform steerPivotFL = ResolveSteerPivot(wheelFL, wheelFL_Steer);
+        Transform steerPivotFR = ResolveSteerPivot(wheelFR, wheelFR_Steer);
 
-        // Pair WheelColliders with matching visual meshes
-        if (wheelColliders.Length > 0 && (wheelMeshes == null || wheelMeshes.Length == 0))
-        {
-            List<Transform> meshList = new List<Transform>();
-            foreach (WheelCollider wc in wheelColliders)
-                meshList.Add(FindWheelMeshForCollider(wc));
-            wheelMeshes = meshList.ToArray();
-        }
-
-        // ── Visual-only fallback ──
-        if (wheelColliders.Length == 0 && (visualOnlyWheels == null || visualOnlyWheels.Length == 0))
-        {
-            List<Transform> list = new List<Transform>();
-            foreach (Transform t in GetComponentsInChildren<Transform>(true))
-            {
-                if (t == transform) continue;
-                string lwr = t.name.ToLower();
-                if (lwr.Contains("wheel") || lwr.Contains("tyre") || lwr.Contains("tire"))
-                    list.Add(t);
-            }
-            if (list.Count > 0)
-            {
-                visualOnlyWheels = list.ToArray();
-                Debug.Log($"[{gameObject.name}] Auto-detected {list.Count} visual wheels by name.");
-            }
-        }
-
-        debugWheelCollidersFound = wheelColliders  != null ? wheelColliders.Length  : 0;
-        debugVisualWheelsFound   = visualOnlyWheels != null ? visualOnlyWheels.Length : 0;
+        _restFL = steerPivotFL != null ? steerPivotFL.localRotation : Quaternion.identity;
+        _restFR = steerPivotFR != null ? steerPivotFR.localRotation : Quaternion.identity;
     }
 
-    private Transform FindWheelMeshForCollider(WheelCollider wc)
+    // Returns the explicit steer pivot if assigned, otherwise wheel.parent, otherwise null.
+    private static Transform ResolveSteerPivot(Transform spinTransform, Transform explicitPivot)
     {
-        // Check direct children of the WheelCollider GameObject
-        foreach (Transform child in wc.transform)
-            if (child.GetComponent<MeshRenderer>() != null) return child;
-
-        // Check siblings under the same parent
-        if (wc.transform.parent == null) return null;
-        foreach (Transform sib in wc.transform.parent)
-        {
-            if (sib == wc.transform) continue;
-            string sibLower = sib.name.ToLower();
-            if (sib.GetComponent<MeshRenderer>() != null &&
-                (sibLower.Contains("wheel") || sibLower.Contains("tyre") || sibLower.Contains("tire")))
-                return sib;
-        }
+        if (explicitPivot != null) return explicitPivot;
+        if (spinTransform  != null) return spinTransform.parent;
         return null;
     }
 
-    // ===================================================
-    // FIXED UPDATE
-    // ===================================================
+    private void OnDestroy()
+    {
+        if (navSystem != null && sourceNodeID != -1 && destinationNodeID != -1)
+            navSystem.ReleaseRoute(sourceNodeID, destinationNodeID);
+    }
+
+    // =========================================================================
+    //  FIXED UPDATE
+    // =========================================================================
 
     private void FixedUpdate()
     {
-        if (navSystem == null || savedRoutePath == null || savedRoutePath.Count == 0) return;
-        if (rb != null && rb.isKinematic) return;
+        if (navSystem == null || !hasTarget) return;
+        if (rb == null || rb.isKinematic) return;
 
-        UpdateDebugInfo();
         _advancedThisFrame = false;
 
         SampleGround();
-        DetectTrafficLightAhead();
-        DetectVehicleAhead();
+        RunDetection();
 
-        bool hasObstacle = DetectObstacle();
-        debugIsObstacleDetected = hasObstacle;
+        // ── Waypoint reach ────────────────────────────────────────────────────
+        float distXZ = HorizontalDistance(transform.position, currentTarget);
+        Vector3 toWpXZ = new Vector3(currentTarget.x - transform.position.x,
+                                     0f,
+                                     currentTarget.z - transform.position.z);
 
-        float distXZ = targetWaypoint != null ? HorizontalDistance(transform.position, targetWaypoint.position) : 0f;
-        float distY  = targetWaypoint != null ? Mathf.Abs(transform.position.y - targetWaypoint.position.y) : 0f;
+        angleToCurrentWaypoint = toWpXZ.sqrMagnitude > 0.01f
+            ? Vector3.Angle(new Vector3(transform.forward.x, 0f, transform.forward.z), toWpXZ)
+            : 0f;
 
-        if (targetWaypoint != null)
+        if (distXZ < waypointReachDistanceXZ
+         && (angleToCurrentWaypoint < 90f || distXZ < 2f)
+         && Time.time - lastAdvanceTime >= minAdvanceInterval)
+            AdvanceWaypoint();
+
+        // ── Speed ─────────────────────────────────────────────────────────────
+        bool shouldStop = ShouldStop();
+        isStopped = shouldStop;
+
+        float slopeFactor = 1f;
+        if (!shouldStop && isGrounded && debugSlopeAngle > 5f)
         {
-            Vector3 toWpXZ = new Vector3(
-                targetWaypoint.position.x - transform.position.x, 0f,
-                targetWaypoint.position.z - transform.position.z);
-            angleToCurrentWaypoint = toWpXZ.sqrMagnitude > 0.01f
-                ? Vector3.Angle(new Vector3(transform.forward.x, 0f, transform.forward.z), toWpXZ)
-                : 0f;
+            float yDiff = currentTarget.y - transform.position.y;
+            if (yDiff > 0.5f)
+                slopeFactor = Mathf.Lerp(1f, 0.72f, Mathf.Clamp01(debugSlopeAngle / 35f));
         }
 
-        // Waypoint is reached when the car is close enough in XZ and Y.
-        // No angle guard — after a repath the new waypoint may be behind the car;
-        // the angle check would prevent advancing and cause circling/stuck loops.
-        bool waypointReached = distXZ < waypointReachDistanceXZ
-                            && distY  < waypointReachDistanceY
-                            && (Time.time - lastAdvanceTime >= MIN_ADVANCE_INTERVAL);
-        if (waypointReached)
-            AdvanceAlongSavedRoute();
-
-        bool shouldStopForTrafficLight = ShouldStopForTrafficLight();
-        bool shouldStopForVehicle      = ShouldStopForVehicleAhead();
-        bool shouldStop = hasObstacle || shouldStopForTrafficLight || shouldStopForVehicle;
-
-        float slopeBoost = 1f;
-        if (!shouldStop && targetWaypoint != null)
-        {
-            float heightDiff = targetWaypoint.position.y - transform.position.y;
-            if (heightDiff > 0.5f) slopeBoost = hillClimbBoost;
-        }
-
-        targetSpeed = shouldStop ? 0f : maxSpeed * slopeBoost;
-        isStopped   = shouldStop;
-
-        debugAtRedLight           = shouldStopForTrafficLight;
-        debugVehicleAheadDetected = shouldStopForVehicle;
-
-        currentSpeed = Mathf.SmoothDamp(currentSpeed, targetSpeed, ref speedSmoothVelocity, speedSmoothTime);
+        targetSpeed  = shouldStop ? 0f : maxSpeed * slopeFactor;
+        currentSpeed = Mathf.SmoothDamp(currentSpeed, targetSpeed,
+                                        ref speedSmoothVelocity, speedSmoothTime);
 
         MoveVehicle();
+        UpdateWheelVisuals();
 
-        if (!shouldStopForTrafficLight && !shouldStopForVehicle)
+        // ── Stuck detection ───────────────────────────────────────────────────
+        if (!shouldStop)
         {
-            float movedXZ = HorizontalDistance(transform.position, lastValidPosition);
-            if (movedXZ < 0.25f && currentSpeed > 0.5f)
+            float moved = HorizontalDistance(transform.position, lastValidPosition);
+            if (moved < stuckMovementThreshold && currentSpeed > 0.5f)
             {
                 stuckCounter++;
-                debugIsStuck = true;
-                if (stuckCounter >= MAX_STUCK_FRAMES)
-                {
-                    Debug.LogWarning($"[{gameObject.name}] ⚠️ STUCK! Attempting recovery...");
-                    RecoverFromStuck();
-                }
+                isStuck = debugIsStuck = true;
+                if (stuckCounter >= maxStuckFrames) RecoverFromStuck();
             }
             else
             {
-                stuckCounter      = 0;
-                debugIsStuck      = false;
+                stuckCounter = 0; isStuck = debugIsStuck = false;
                 lastValidPosition = transform.position;
             }
         }
         else
         {
-            stuckCounter      = 0;
-            debugIsStuck      = false;
+            stuckCounter = 0; isStuck = debugIsStuck = false;
             lastValidPosition = transform.position;
         }
+
+        UpdateDebugInfo();
     }
 
-    // ===================================================
-    // UPDATE — WHEEL ROTATION (every frame for smooth visuals)
-    // ===================================================
-
-    private void Update()
-    {
-        if (wheelColliders != null && wheelColliders.Length > 0)
-            UpdateWheelCollidersVisual();
-        else if (visualOnlyWheels != null && visualOnlyWheels.Length > 0)
-            UpdateVisualOnlyWheels();
-    }
-
-    /// <summary>
-    /// Drives WheelColliders with motor/brake torque and syncs visual meshes.
-    /// Standard Unity approach — handles suspension travel automatically.
-    /// </summary>
-    private void UpdateWheelCollidersVisual()
-    {
-        for (int i = 0; i < wheelColliders.Length; i++)
-        {
-            if (wheelColliders[i] == null) continue;
-
-            if (isStopped)
-            {
-                wheelColliders[i].motorTorque = 0f;
-                wheelColliders[i].brakeTorque = 3000f;
-            }
-            else
-            {
-                float wheelSpeedMs = wheelColliders[i].rpm * (2f * Mathf.PI * wheelColliders[i].radius) / 60f;
-                float error        = currentSpeed - wheelSpeedMs;
-                wheelColliders[i].motorTorque = Mathf.Clamp(error * 60f, 0f, 800f);
-                wheelColliders[i].brakeTorque = 0f;
-            }
-
-            if (i < wheelMeshes.Length && wheelMeshes[i] != null)
-            {
-                wheelColliders[i].GetWorldPose(out Vector3 pos, out Quaternion rot);
-                wheelMeshes[i].position = pos;
-                wheelMeshes[i].rotation = rot;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Visual-only wheel spin without WheelColliders.
-    /// Rotates wheel transforms around their local spin axis based on vehicle speed.
-    /// Formula: degrees_per_second = (speed_m_s / circumference_m) * 360
-    /// </summary>
-    private void UpdateVisualOnlyWheels()
-    {
-        if (visualWheelRadius <= 0f) visualWheelRadius = 0.35f;
-        float circumference = 2f * Mathf.PI * visualWheelRadius;
-        float rotThisFrame  = (currentSpeed / circumference) * 360f * Time.deltaTime;
-
-        foreach (Transform wheel in visualOnlyWheels)
-        {
-            if (wheel == null) continue;
-            wheel.Rotate(visualWheelSpinAxis, rotThisFrame, Space.Self);
-        }
-    }
-
-    // ===================================================
-    // GROUND SAMPLING
-    // ===================================================
+    // =========================================================================
+    //  GROUND SAMPLING
+    // =========================================================================
 
     private void SampleGround()
     {
-        Vector3 rayOrigin = transform.position + Vector3.up * groundRayUpOffset;
-        if (Physics.Raycast(rayOrigin, Vector3.down, out RaycastHit hit,
-                            groundRayDistance + groundRayUpOffset, groundLayer))
+        _wFL_hit = CastWheelRay(wheelFL, out _wFL_pt);
+        _wFR_hit = CastWheelRay(wheelFR, out _wFR_pt);
+        _wRL_hit = CastWheelRay(wheelRL, out _wRL_pt);
+        _wRR_hit = CastWheelRay(wheelRR, out _wRR_pt);
+
+        _wheelHitCount = (_wFL_hit ? 1 : 0) + (_wFR_hit ? 1 : 0)
+                       + (_wRL_hit ? 1 : 0) + (_wRR_hit ? 1 : 0);
+        debugWheelHits = _wheelHitCount;
+
+        if (_wheelHitCount >= 4)
         {
-            isGrounded      = true;
-            groundNormal    = hit.normal;
-            currentGroundY  = hit.point.y;
-            debugSlopeAngle = Vector3.Angle(groundNormal, Vector3.up);
-            debugGroundY    = currentGroundY;
-            debugIsGrounded = true;
+            Compute4WheelNormal();
+            isGrounded = debugGrounded = true;
+            debugGroundSource = "4-Wheel";
+            debugGroundY = currentGroundY;
+            debugSlopeAngle = Vector3.Angle(Vector3.up, groundNormal);
+            return;
         }
-        else
+        if (_wheelHitCount == 3)
         {
-            isGrounded      = false;
-            groundNormal    = Vector3.up;
+            Compute3WheelNormal();
+            isGrounded = debugGrounded = true;
+            debugGroundSource = "3-Wheel";
+            debugGroundY = currentGroundY;
+            debugSlopeAngle = Vector3.Angle(Vector3.up, groundNormal);
+            return;
+        }
+        if (_wheelHitCount == 2)
+        {
+            Compute2WheelNormal();
+            isGrounded = debugGrounded = true;
+            debugGroundSource = "2-Wheel";
+            debugGroundY = currentGroundY;
+            debugSlopeAngle = Vector3.Angle(Vector3.up, groundNormal);
+            return;
+        }
+        if (_wheelHitCount == 1)
+        {
+            ComputeSingleWheelFallback();
+            isGrounded = debugGrounded = true;
+            debugGroundSource = "1-Wheel";
+            debugGroundY = currentGroundY;
             debugSlopeAngle = 0f;
-            debugIsGrounded = false;
-        }
-    }
-
-
-
-    // ===================================================
-    // TRAFFIC LIGHT DETECTION
-    // ===================================================
-
-    private void DetectTrafficLightAhead()
-    {
-        if (!enableTrafficLightCompliance)
-        {
-            currentTrafficLight         = null;
-            isInTrafficLightZone        = false;
-            debugTrafficLightID         = "Disabled";
-            debugTrafficLightState      = "N/A";
-            debugDistanceToTrafficLight = 0f;
             return;
         }
 
-        Collider[] nearby = Physics.OverlapSphere(
-            transform.position + Vector3.up * 1f, trafficLightDetectionRange, trafficLightLayerMask);
+        // Centre-body fallback
+        Vector3 origin = transform.position + Vector3.up * groundRayUpOffset;
+        float   dist   = groundRayDistance + groundRayUpOffset;
 
-        EnhancedTrafficLightViolationDetector closestLight = null;
-        float closestDistance = float.MaxValue;
-
-        foreach (Collider col in nearby)
+        if (Physics.Raycast(origin, Vector3.down, out RaycastHit hit, dist,
+                            groundLayer, QueryTriggerInteraction.Ignore))
         {
-            var detector = col.GetComponent<EnhancedTrafficLightViolationDetector>();
-            if (detector == null) continue;
+            isGrounded      = debugGrounded = true;
+            groundNormal    = hit.normal;
+            currentGroundY  = hit.point.y;
+            groundHitPoint  = hit.point;
+            debugGroundY    = currentGroundY;
+            debugSlopeAngle = Vector3.Angle(Vector3.up, groundNormal);
+            debugGroundSource = "CentreBody";
 
-            Vector3 toLight = detector.transform.position - transform.position;
-            toLight.y = 0;
-            float dot  = Vector3.Dot(transform.forward, toLight.normalized);
-            float dist = Vector3.Distance(transform.position, detector.transform.position);
+            if (showDebugRays) Debug.DrawLine(origin, hit.point, Color.yellow);
+        }
+        else
+        {
+            isGrounded = debugGrounded = false;
+            groundNormal      = Vector3.up;
+            debugSlopeAngle   = 0f;
+            debugGroundSource = "Airborne";
 
-            bool isAhead            = dot > -0.2f;
-            bool alreadyAtThisLight = (currentTrafficLight == detector && isStoppedAtRedLight);
+            if (showDebugRays) Debug.DrawRay(origin, Vector3.down * dist, Color.red);
+        }
+    }
 
-            if ((isAhead || alreadyAtThisLight) && dist < closestDistance)
-            {
-                closestLight    = detector;
-                closestDistance = dist;
-            }
+    private bool CastWheelRay(Transform wheel, out Vector3 hitPoint)
+    {
+        hitPoint = Vector3.zero;
+        if (wheel == null) return false;
+
+        Vector3 origin = wheel.position + Vector3.up * (wheelRadius * 0.6f);
+
+        if (Physics.Raycast(origin, Vector3.down, out RaycastHit hit,
+                            wheelRayDistance, groundLayer, QueryTriggerInteraction.Ignore))
+        {
+            hitPoint = hit.point;
+            if (showDebugRays) Debug.DrawLine(origin, hit.point, Color.green);
+            return true;
         }
 
-        if (closestLight != null)
-        {
-            bool isNewLight             = (currentTrafficLight == null || currentTrafficLight != closestLight);
-            currentTrafficLight         = closestLight;
-            isInTrafficLightZone        = true;
-            debugDistanceToTrafficLight = closestDistance;
-            debugTrafficLightID         = currentTrafficLight.GetTrafficLightID();
+        if (showDebugRays) Debug.DrawRay(origin, Vector3.down * wheelRayDistance, Color.red);
+        return false;
+    }
 
-            TrafficLightController tlc  = currentTrafficLight.GetTrafficLight();
-            if (tlc != null)
+    private void Compute4WheelNormal()
+    {
+        Vector3 d1 = _wRR_pt - _wFL_pt;
+        Vector3 d2 = _wFR_pt - _wRL_pt;
+        Vector3 n  = Vector3.Cross(d1, d2).normalized;
+        if (n.y < 0f) n = -n;
+
+        groundNormal   = ClampNormal(n);
+        currentGroundY = (_wFL_pt.y + _wFR_pt.y + _wRL_pt.y + _wRR_pt.y) * 0.25f;
+        groundHitPoint = (_wFL_pt   + _wFR_pt   + _wRL_pt   + _wRR_pt  ) * 0.25f;
+    }
+
+    private void Compute3WheelNormal()
+    {
+        var pts = new List<Vector3>(3);
+        if (_wFL_hit) pts.Add(_wFL_pt);
+        if (_wFR_hit) pts.Add(_wFR_pt);
+        if (_wRL_hit) pts.Add(_wRL_pt);
+        if (_wRR_hit) pts.Add(_wRR_pt);
+
+        Vector3 n = Vector3.Cross(pts[1] - pts[0], pts[2] - pts[0]).normalized;
+        if (n.y < 0f) n = -n;
+
+        groundNormal   = ClampNormal(n);
+        currentGroundY = (pts[0].y + pts[1].y + pts[2].y) / 3f;
+        groundHitPoint = (pts[0]   + pts[1]   + pts[2]  ) / 3f;
+    }
+
+    private void Compute2WheelNormal()
+    {
+        Vector3 a, b;
+        if      (_wFL_hit && _wFR_hit) { a = _wFL_pt; b = _wFR_pt; }
+        else if (_wRL_hit && _wRR_hit) { a = _wRL_pt; b = _wRR_pt; }
+        else if (_wFL_hit && _wRL_hit) { a = _wFL_pt; b = _wRL_pt; }
+        else if (_wFR_hit && _wRR_hit) { a = _wFR_pt; b = _wRR_pt; }
+        else if (_wFL_hit && _wRR_hit) { a = _wFL_pt; b = _wRR_pt; }
+        else                           { a = _wFR_pt; b = _wRL_pt; }
+
+        Vector3 axis  = (b - a).normalized;
+        Vector3 right = Vector3.Cross(Vector3.up, axis).normalized;
+        Vector3 n     = Vector3.Cross(axis, right).normalized;
+        if (n.y < 0f) n = -n;
+
+        groundNormal   = ClampNormal(n);
+        currentGroundY = (a.y + b.y) * 0.5f;
+        groundHitPoint = (a   + b  ) * 0.5f;
+    }
+
+    private void ComputeSingleWheelFallback()
+    {
+        Vector3 pt = _wFL_hit ? _wFL_pt : _wFR_hit ? _wFR_pt : _wRL_hit ? _wRL_pt : _wRR_pt;
+        groundNormal   = Vector3.up;
+        currentGroundY = pt.y;
+        groundHitPoint = pt;
+    }
+
+    private static Vector3 ClampNormal(Vector3 n)
+    {
+        const float MAX_TILT = 40f;
+        float angle = Vector3.Angle(Vector3.up, n);
+        if (angle > MAX_TILT)
+            n = Vector3.Slerp(Vector3.up, n, MAX_TILT / angle);
+        return n.normalized;
+    }
+
+    // =========================================================================
+    //  DETECTION
+    // =========================================================================
+
+    private void RunDetection()
+    {
+        _hitType     = HitType.None;
+        _hitDistance = float.MaxValue;
+        _hitObject   = null;
+
+        Vector3 origin  = transform.position + Vector3.up * 1.2f;
+        Vector3 rawFwd  = transform.forward;
+        Vector3 forward = new Vector3(rawFwd.x,
+                                      Mathf.Clamp(rawFwd.y, -0.35f, 0.35f),
+                                      rawFwd.z).normalized;
+
+        RaycastHit[] hits = Physics.RaycastAll(origin, forward, detectionRange,
+                                               detectionLayerMask);
+        System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+
+        foreach (RaycastHit hit in hits)
+        {
+            if (hit.collider.transform.IsChildOf(transform)) continue;
+            int layerBit = 1 << hit.collider.gameObject.layer;
+
+            if ((layerBit & trafficLightLayer) != 0)
             {
-                debugTrafficLightState = tlc.currentState.ToString();
-                if (isNewLight && tlc.currentState == TrafficLightController.LightState.Red)
+                TrafficLightController tlc =
+                    hit.collider.GetComponentInParent<TrafficLightController>();
+                if (tlc != null) _currentLight = tlc;
+
+                if (_currentLight != null &&
+                    _currentLight.currentState != TrafficLightController.LightState.Green &&
+                    _hitType == HitType.None)
                 {
-                    Vector3 dir            = (currentTrafficLight.transform.position - transform.position).normalized;
-                    redLightStopPosition   = currentTrafficLight.transform.position - dir * trafficLightStoppingDistance;
-                    redLightStopPosition.y = transform.position.y;
-                    hasReachedStopPosition = false;
+                    _hitType     = HitType.TrafficLight;
+                    _hitDistance = hit.distance;
+                    _hitObject   = hit.collider.gameObject;
                 }
+                continue;
+            }
+
+            HitType type;
+            if      ((layerBit & npcVehicleLayer)    != 0) type = HitType.NpcVehicle;
+            else if ((layerBit & playerVehicleLayer) != 0) type = HitType.PlayerVehicle;
+            else                                            type = HitType.Obstacle;
+
+            _hitType     = type;
+            _hitDistance = hit.distance;
+            _hitObject   = hit.collider.gameObject;
+            break;
+        }
+
+        if (_hitType == HitType.None || _hitType == HitType.TrafficLight)
+            TryClearStaleLight();
+
+        if (showDebugGizmos || showDebugRays)
+        {
+            Color c;
+            switch (_hitType)
+            {
+                case HitType.TrafficLight:   c = Color.cyan;   break;
+                case HitType.NpcVehicle:
+                case HitType.PlayerVehicle:
+                    c = _hitDistance < vehicleStoppingDistance ? Color.red : Color.yellow; break;
+                case HitType.Obstacle:       c = Color.red;    break;
+                default:                     c = Color.green;  break;
+            }
+            Debug.DrawRay(origin, forward * detectionRange, c);
+        }
+
+        debugHitType            = _hitType.ToString();
+        debugHitDist            = _hitType != HitType.None ? _hitDistance : 0f;
+        debugLightState         = _currentLight != null
+                                    ? _currentLight.currentState.ToString() : "None";
+        debugIsObstacleDetected = (_hitType == HitType.Obstacle   ||
+                                   _hitType == HitType.NpcVehicle ||
+                                   _hitType == HitType.PlayerVehicle);
+    }
+
+    private void TryClearStaleLight()
+    {
+        if (_currentLight == null) return;
+        if (Vector3.Distance(transform.position,
+                             _currentLight.transform.position) > detectionRange * 1.5f)
+        {
+            _currentLight = null;
+            _stoppedAtRed = false;
+        }
+    }
+
+    // =========================================================================
+    //  STOP DECISION
+    // =========================================================================
+
+    private bool ShouldStop()
+    {
+        switch (_hitType)
+        {
+            case HitType.NpcVehicle:
+            case HitType.PlayerVehicle: return ShouldStopForVehicle();
+            case HitType.Obstacle:      return _hitDistance < obstacleStoppingDistance;
+            case HitType.TrafficLight:  return ShouldStopForLight();
+            default:
+                if (_currentLight != null &&
+                    _currentLight.currentState == TrafficLightController.LightState.Green)
+                    _stoppedAtRed = false;
+                return false;
+        }
+    }
+
+    private bool ShouldStopForVehicle()
+    {
+        if (_hitDistance > vehicleStoppingDistance) return false;
+        if (_hitType == HitType.NpcVehicle && _hitObject != null)
+        {
+            TrafficVehicle ahead = _hitObject.transform.root.GetComponent<TrafficVehicle>()
+                                ?? _hitObject.GetComponentInParent<TrafficVehicle>();
+            if (ahead != null)
+            {
+                if (_hitDistance < vehicleStoppingDistance * 0.6f) return true;
+                return ahead.isStopped || ahead.currentSpeed < 1f;
+            }
+        }
+        return true;
+    }
+
+    private bool ShouldStopForLight()
+    {
+        if (_currentLight == null) return false;
+        var state = _currentLight.currentState;
+
+        if (state == TrafficLightController.LightState.Green)
+        { _stoppedAtRed = false; return false; }
+
+        if (_stoppedAtRed && Time.time - _redLightEntryTime > maxRedLightWaitTime)
+        {
+            _stoppedAtRed = false;
+            Debug.LogWarning($"[{gameObject.name}] Red-light timeout — proceeding.");
+            return false;
+        }
+
+        bool inStopZone = _hitDistance < trafficLightStopDistance;
+        if (state == TrafficLightController.LightState.Yellow && !inStopZone) return false;
+
+        if (!_stoppedAtRed && inStopZone)
+        { _stoppedAtRed = true; _redLightEntryTime = Time.time; }
+
+        return _stoppedAtRed || inStopZone;
+    }
+
+    // =========================================================================
+    //  MOVE VEHICLE
+    // =========================================================================
+
+    private void MoveVehicle()
+    {
+        if (!hasTarget || rb == null || rb.isKinematic) return;
+
+        Vector3 toTargetXZ = new Vector3(currentTarget.x - transform.position.x,
+                                         0f,
+                                         currentTarget.z - transform.position.z);
+
+        if (toTargetXZ.sqrMagnitude > 0.01f)
+        {
+            Quaternion targetYaw  = Quaternion.LookRotation(toTargetXZ, Vector3.up);
+            Quaternion currentYaw = Quaternion.Euler(0f, rb.rotation.eulerAngles.y, 0f);
+            float      turnMult   = Mathf.Lerp(1f, 2.5f,
+                                        Mathf.Clamp01(angleToCurrentWaypoint / 90f));
+            Quaternion smoothYaw  = Quaternion.Slerp(currentYaw, targetYaw,
+                                        Time.fixedDeltaTime * turnSpeed * turnMult);
+
+            float yawDelta = Mathf.DeltaAngle(currentYaw.eulerAngles.y,
+                                              smoothYaw.eulerAngles.y);
+            currentSteerAngle = Mathf.Clamp(yawDelta * 4f, -maxSteerAngle, maxSteerAngle);
+
+            Quaternion desiredRot;
+            if (isGrounded && debugSlopeAngle > 0.5f)
+            {
+                Vector3 gFwd = Vector3.ProjectOnPlane(
+                    smoothYaw * Vector3.forward, groundNormal);
+                desiredRot = gFwd.sqrMagnitude > 0.001f
+                    ? Quaternion.LookRotation(gFwd.normalized, groundNormal)
+                    : smoothYaw;
             }
             else
             {
-                debugTrafficLightState = "No Controller";
+                desiredRot = smoothYaw;
             }
+
+            _smoothedSlopeTilt = Quaternion.Slerp(_smoothedSlopeTilt, desiredRot,
+                                                   Time.fixedDeltaTime * slopeTiltSpeed);
+        }
+
+        rb.MoveRotation(_smoothedSlopeTilt);
+
+        if (currentSpeed < 0.01f) { SnapYToGround(); return; }
+
+        float align = Mathf.Max(
+            Mathf.Clamp01(1f - angleToCurrentWaypoint / 90f) *
+            Mathf.Clamp01(1f - angleToCurrentWaypoint / 90f), 0.02f);
+
+        Vector3 flatFwd = new Vector3(transform.forward.x, 0f, transform.forward.z);
+        if (flatFwd.sqrMagnitude < 0.001f) flatFwd = Vector3.forward;
+        flatFwd.Normalize();
+
+        float   moveDist = currentSpeed * align * Time.fixedDeltaTime;
+        Vector3 newXZPos = new Vector3(rb.position.x + flatFwd.x * moveDist,
+                                       rb.position.y,
+                                       rb.position.z + flatFwd.z * moveDist);
+
+        if (NavMesh.SamplePosition(newXZPos, out NavMeshHit navHit,
+                                   navMeshSampleRadius, navMeshAreaMask))
+        {
+            newXZPos.x = navHit.position.x;
+            newXZPos.z = navHit.position.z;
+        }
+
+        float finalY;
+        if (isGrounded)
+        {
+            float desiredY = currentGroundY + rideHeight;
+            float lerpT    = Mathf.Clamp01(groundSnapStrength * Time.fixedDeltaTime);
+            finalY = Mathf.Lerp(rb.position.y, desiredY, lerpT);
+            finalY = Mathf.Clamp(finalY, desiredY - 0.8f, desiredY + 0.8f);
         }
         else
         {
-            if (isInTrafficLightZone)
-            {
-                isInTrafficLightZone   = false;
-                isStoppedAtRedLight    = false;
-                hasReachedStopPosition = false;
-            }
-            currentTrafficLight         = null;
-            debugTrafficLightID         = "None";
-            debugTrafficLightState      = "N/A";
-            debugDistanceToTrafficLight = 0f;
+            finalY = rb.position.y - 9.81f * Time.fixedDeltaTime;
         }
+
+        rb.MovePosition(new Vector3(newXZPos.x, finalY, newXZPos.z));
     }
 
-    private bool ShouldStopForTrafficLight()
+    private void SnapYToGround()
     {
-        if (!enableTrafficLightCompliance || currentTrafficLight == null)
-        {
-            isStoppedAtRedLight = false;
-            return false;
-        }
-
-        TrafficLightController tlc = currentTrafficLight.GetTrafficLight();
-        if (tlc == null) { isStoppedAtRedLight = false; return false; }
-
-        var lightState = tlc.currentState;
-
-        if (lightState == TrafficLightController.LightState.Green)
-        {
-            isStoppedAtRedLight    = false;
-            hasReachedStopPosition = false;
-            return false;
-        }
-
-        if (isStoppedAtRedLight && Time.time - timeEnteredRedLightZone > maxRedLightWaitTime)
-        {
-            isStoppedAtRedLight    = false;
-            hasReachedStopPosition = false;
-            return false;
-        }
-
-        float stopDist = trafficLightStoppingDistance + violationColliderBuffer;
-
-        if (lightState == TrafficLightController.LightState.Red ||
-            lightState == TrafficLightController.LightState.Yellow)
-        {
-            bool closeEnoughToStop = debugDistanceToTrafficLight < stopDist;
-            if (lightState == TrafficLightController.LightState.Yellow && !closeEnoughToStop) return false;
-
-            if (!isStoppedAtRedLight && closeEnoughToStop)
-            {
-                isStoppedAtRedLight     = true;
-                hasReachedStopPosition  = true;
-                timeEnteredRedLightZone = Time.time;
-            }
-            if (isStoppedAtRedLight || closeEnoughToStop) return true;
-        }
-
-        return false;
+        if (!isGrounded || rb == null) return;
+        float desiredY = currentGroundY + rideHeight;
+        float lerpT    = Mathf.Clamp01(groundSnapStrength * Time.fixedDeltaTime);
+        float newY     = Mathf.Lerp(rb.position.y, desiredY, lerpT);
+        rb.MovePosition(new Vector3(rb.position.x, newY, rb.position.z));
     }
 
-    // ===================================================
-    // VEHICLE-AHEAD DETECTION
-    // ===================================================
+    // =========================================================================
+    //  WHEEL VISUALS
+    //
+    //  STEER — pure quaternion composition, NO euler read-back:
+    //      steerPivot.localRotation = _restRot * Quaternion.AngleAxis(deg, Vector3.up)
+    //
+    //  This preserves every baked axis (camber, caster, toe) on the steer pivot
+    //  regardless of how complex the prefab hierarchy is.
+    //
+    //  SPIN — applied directly to the spin transform (wheelFL etc.) which is the
+    //  "Rotating" child, keeping spin and steer on completely separate transforms.
+    // =========================================================================
 
-    private void DetectVehicleAhead()
+    private void UpdateWheelVisuals()
     {
-        if (!enableVehicleAheadDetection)
-        {
-            detectedVehicleAhead        = null;
-            distanceToVehicleAhead      = 0f;
-            debugDistanceToVehicleAhead = 0f;
-            return;
-        }
+        if (wheelRadius <= 0.001f) return;
 
-        // Use vehicleLayerMask — covers ALL vehicle layers (NPC cars + player car + any other road vehicle).
-        // If vehicleLayerMask is 0 (not set), fall back to obstacleLayer so detection still works.
-        LayerMask scanMask = vehicleLayerMask.value != 0 ? vehicleLayerMask : obstacleLayer;
+        float degreesPerMeter = 360f / (2f * Mathf.PI * wheelRadius);
+        float deltaDeg        = currentSpeed * Time.fixedDeltaTime * degreesPerMeter;
+        Quaternion spinDelta  = Quaternion.AngleAxis(deltaDeg, wheelSpinAxis);
 
-        Vector3 rayStart      = transform.position + Vector3.up * 1f;
-        Vector3 forward       = transform.forward;
-        Vector3 right         = transform.right;
-        GameObject closestV   = null;
-        float closestDistance = float.MaxValue;
+        // Rear wheels — spin only
+        SpinWheel(wheelRL, spinDelta);
+        SpinWheel(wheelRR, spinDelta);
 
-        for (int i = 0; i < multiRayCount; i++)
-        {
-            Vector3 rayDir = forward;
-            if (i == 1) rayDir = (forward - right * lateralDetectionWidth).normalized;
-            else if (i == 2) rayDir = (forward + right * lateralDetectionWidth).normalized;
-
-            RaycastHit[] hits = Physics.RaycastAll(rayStart, rayDir, vehicleDetectionRange, scanMask);
-            foreach (RaycastHit hit in hits)
-            {
-                if (hit.collider.transform.IsChildOf(transform)) continue; // skip own colliders
-                if (hit.distance < closestDistance)
-                {
-                    closestV        = hit.collider.transform.root.gameObject;
-                    closestDistance = hit.distance;
-                }
-            }
-
-            if (showDebugGizmos)
-                Debug.DrawRay(rayStart, rayDir * vehicleDetectionRange,
-                              closestV != null ? Color.red : Color.cyan);
-        }
-
-        if (closestV != null)
-        {
-            detectedVehicleAhead        = closestV;
-            distanceToVehicleAhead      = closestDistance;
-            debugDistanceToVehicleAhead = closestDistance;
-        }
-        else
-        {
-            detectedVehicleAhead        = null;
-            distanceToVehicleAhead      = 0f;
-            debugDistanceToVehicleAhead = 0f;
-        }
+        // Front wheels — steer + spin on separate transforms
+        SteerAndSpinFrontWheel(wheelFL, wheelFL_Steer, spinDelta, currentSteerAngle, _restFL);
+        SteerAndSpinFrontWheel(wheelFR, wheelFR_Steer, spinDelta, currentSteerAngle, _restFR);
     }
 
-    private bool ShouldStopForVehicleAhead()
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Spin-only  (rear wheels)
+    // ─────────────────────────────────────────────────────────────────────────
+    private static void SpinWheel(Transform spinTransform, Quaternion spinDelta)
     {
-        if (!enableVehicleAheadDetection || detectedVehicleAhead == null) return false;
-
-        if (distanceToVehicleAhead < vehicleStoppingDistance)
-        {
-            // If it's an NPC with a known speed, only stop if it's slow/stopped
-            TrafficVehicle npc = detectedVehicleAhead.GetComponent<TrafficVehicle>();
-            if (npc != null) return npc.currentSpeed < 1f || npc.isStopped || distanceToVehicleAhead < vehicleStoppingDistance * 0.7f;
-            // Player car or unknown vehicle — always stop within stopping distance
-            return true;
-        }
-        return false;
+        if (spinTransform == null) return;
+        spinTransform.localRotation *= spinDelta;
     }
 
-    // ===================================================
-    // ROUTE MANAGEMENT
-    // ===================================================
-
-    private bool _isPickingDestination = false;
-
-    private void PickNewDestinationAndSaveRoute()
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Steer + Spin  (front wheels)
+    //
+    //  steerPivot  = explicit wheelFL_Steer if assigned, else spinTransform.parent
+    //  restRot     = steerPivot's original localRotation snapshotted at init
+    //
+    //  Safe quaternion steer:
+    //      steerPivot.localRotation = restRot * AngleAxis(steerDeg, up)
+    //  This rotates the pivot around its OWN local up axis by steerDeg degrees,
+    //  preserving all other baked-in rotational offsets exactly.
+    // ─────────────────────────────────────────────────────────────────────────
+    private static void SteerAndSpinFrontWheel(Transform spinTransform,
+                                               Transform explicitSteerPivot,
+                                               Quaternion spinDelta,
+                                               float steerDeg,
+                                               Quaternion restRot)
     {
-        if (_isPickingDestination) return;
-        _isPickingDestination = true;
-        try { PickNewDestinationAndSaveRouteInternal(); }
-        finally { _isPickingDestination = false; }
-    }
+        if (spinTransform == null) return;
 
-    private void PickNewDestinationAndSaveRouteInternal()
-    {
-        if (navSystem == null || navSystem.nodeMap.Count < 2)
+        // Resolve steer pivot
+        Transform steerPivot = explicitSteerPivot != null
+            ? explicitSteerPivot
+            : spinTransform.parent;
+
+        // Apply steer — quaternion only, no euler
+        if (steerPivot != null)
         {
-            Debug.LogError($"[{gameObject.name}] Not enough nodes for pathfinding!");
-            return;
-        }
-
-        List<int> allNodes = navSystem.nodeMap.Keys.ToList();
-
-        for (int attempt = 0; attempt < maxPathAttempts; attempt++)
-        {
-            int dest = PickDestinationWithinRange(allNodes);
-            if (dest == -1)
-                dest = navSystem.GetRandomNode(new HashSet<int> { sourceNodeID });
-
-            List<int> path = navSystem.FindPath(sourceNodeID, dest);
-            if (path == null || path.Count == 0) continue;
-            if (path.Count < minPathLength)       continue;
-            if (path.Count > maxPathLength)       continue;
-
-            SaveRouteToVehicle(path, dest);
-            return;
+            steerPivot.localRotation = restRot * Quaternion.AngleAxis(steerDeg, Vector3.up);
         }
 
-        Debug.LogError($"[{gameObject.name}] Failed to find path! Fallback.");
-        FallbackPath();
+        // Apply spin — purely local, unaffected by steer pivot
+        spinTransform.localRotation *= spinDelta;
     }
 
-    private void SaveRouteToVehicle(List<int> path, int destination)
-    {
-        savedRoutePath     = new List<int>(path);
-        destinationNodeID  = destination;
-        pathRecalculations = 0;
+    // =========================================================================
+    //  WAYPOINT ADVANCEMENT
+    // =========================================================================
 
-        currentPathIndex = savedRoutePath.Count > 1 ? 1 : 0;
-        SetTargetWaypoint(savedRoutePath[currentPathIndex]);
-
-        debugRouteName  = $"Route_{sourceNodeID}_to_{destinationNodeID}";
-        debugTotalNodes = savedRoutePath.Count;
-        debugSavedRoute = string.Join(" > ", savedRoutePath);
-
-        int previewCount = Mathf.Min(5, savedRoutePath.Count);
-        debugNextNodes   = string.Join(" > ", savedRoutePath.Take(previewCount));
-        if (savedRoutePath.Count > previewCount) debugNextNodes += "...";
-    }
-
-    private int PickDestinationWithinRange(List<int> allNodes)
-    {
-        if (!navSystem.nodeMap.ContainsKey(sourceNodeID)) return -1;
-        Vector3 sourcePos = navSystem.nodeMap[sourceNodeID].worldPosition;
-
-        // Progressive distance relaxation: try full range first, then halve, then any distance.
-        // Always exclude sourceNodeID itself and its immediate graph neighbours to prevent
-        // single-step back-and-forth oscillation.
-        HashSet<int> immediateNeighbours = new HashSet<int>(navSystem.GetNeighbors(sourceNodeID));
-        immediateNeighbours.Add(sourceNodeID);
-
-        // First pass: respect minimum distance, exclude neighbours
-        // Second pass: half minimum distance, exclude neighbours
-        // Third pass: any distance, exclude only sourceNodeID
-        float[] minDistFallbacks   = { minDestinationDistance, minDestinationDistance * 0.5f, 0f };
-        bool[]  excludeNeighbours  = { true,                   true,                          false };
-
-        for (int pass = 0; pass < minDistFallbacks.Length; pass++)
-        {
-            float minDist   = minDistFallbacks[pass];
-            bool  exclNeigh = excludeNeighbours[pass];
-            var valid = new List<int>();
-
-            foreach (int id in allNodes)
-            {
-                if (!navSystem.nodeMap.ContainsKey(id)) continue;
-                if (exclNeigh && immediateNeighbours.Contains(id)) continue;
-                else if (id == sourceNodeID) continue;
-
-                float d = Vector3.Distance(sourcePos, navSystem.nodeMap[id].worldPosition);
-                if (d >= minDist && d <= maxDestinationDistance) valid.Add(id);
-            }
-            if (valid.Count > 0)
-                return valid[Random.Range(0, valid.Count)];
-        }
-        return -1;
-    }
-
-    private bool _advancedThisFrame = false;
-
-    private void AdvanceAlongSavedRoute()
+    private void AdvanceWaypoint()
     {
         if (_advancedThisFrame) return;
         _advancedThisFrame = true;
         lastAdvanceTime    = Time.time;
+        waypointIndex++;
 
-        currentPathIndex++;
-
-        if (currentPathIndex >= savedRoutePath.Count)
+        if (waypointIndex >= denseWaypoints.Count)
         {
-            Debug.Log($"[{gameObject.name}] Destination reached: Node {destinationNodeID}");
+            Debug.Log($"[{gameObject.name}] ✅ Reached Node {destinationNodeID}");
+            navSystem.ReleaseRoute(sourceNodeID, destinationNodeID);
             sourceNodeID  = destinationNodeID;
             currentNodeID = sourceNodeID;
-            PickNewDestinationAndSaveRoute();
+            PickNewDestinationAndBuildRoute();
             return;
         }
 
-        int nextNodeID = savedRoutePath[currentPathIndex];
-        int safeNodeID = FindNextReachableWaypoint(currentPathIndex);
-
-        if (safeNodeID != nextNodeID)
-        {
-            int safeIndex = savedRoutePath.IndexOf(safeNodeID, currentPathIndex);
-            if (safeIndex >= 0) currentPathIndex = safeIndex;
-            nextNodeID = savedRoutePath[currentPathIndex];
-        }
-
-        currentNodeID = nextNodeID;
-        SetTargetWaypoint(currentNodeID);
+        currentTarget = denseWaypoints[waypointIndex];
+        hasTarget     = true;
     }
 
-    private int FindNextReachableWaypoint(int startIndex)
+    // =========================================================================
+    //  ROUTE BUILDING
+    // =========================================================================
+
+    private void PickNewDestinationAndBuildRoute()
     {
-        const int lookahead = 4;
-        // Strip vehicles AND ground from the obstacle mask — only static geometry (buildings,
-        // walls, barriers) should count as impassable for waypoint-reachability checks.
-        // Vehicles (including parked NPCs or the player) must NOT block path lookahead or
-        // the car will orbit a single node whenever another car is stopped on the road.
-        int staticMask = obstacleLayer & ~groundLayer & ~vehicleLayerMask;
-
-        for (int i = startIndex; i < Mathf.Min(startIndex + lookahead, savedRoutePath.Count); i++)
-        {
-            int nodeID = savedRoutePath[i];
-            if (!navSystem.nodeMap.ContainsKey(nodeID)) continue;
-
-            Vector3 nodePos = navSystem.nodeMap[nodeID].transform.position + Vector3.up * 1.5f;
-            Vector3 from    = transform.position + Vector3.up * 1.5f;
-            float   dist    = Vector3.Distance(from, nodePos);
-
-            // If staticMask is 0 (nothing assigned) skip the cast and treat node as reachable
-            if (staticMask == 0 || !Physics.SphereCast(from, 0.5f, (nodePos - from).normalized, out _, dist, staticMask))
-                return nodeID;
-        }
-        return savedRoutePath[startIndex];
+        if (navSystem == null) { Debug.LogError($"[{gameObject.name}] No NavSystem."); return; }
+        ApplyRouteResult(navSystem.RequestRoute(sourceNodeID));
     }
 
-    private void SetTargetWaypoint(int nodeID)
+    private void ApplyRouteResult(CentralizedNavigationSystem.RouteResult result)
     {
-        if (navSystem.nodeMap.ContainsKey(nodeID))
+        if (!result.success)
         {
-            targetWaypoint = navSystem.nodeMap[nodeID].transform;
-            currentNodeID  = nodeID;
+            Debug.LogError($"[{gameObject.name}] Route failed: {result.failReason}");
+            hasTarget = false;
+            return;
         }
-        else
-        {
-            Debug.LogError($"[{gameObject.name}] Node {nodeID} not found in nodeMap!");
-        }
+
+        sourceNodeID       = result.sourceNodeID;
+        destinationNodeID  = result.destinationNodeID;
+        denseWaypoints     = result.waypoints;
+        waypointIndex      = 1;
+        pathRecalculations = 0;
+
+        hasTarget     = denseWaypoints.Count > 1;
+        currentTarget = hasTarget ? denseWaypoints[waypointIndex] : transform.position;
+
+        string routeStr     = $"{sourceNodeID}→{destinationNodeID}";
+        debugChainName      = routeStr;
+        debugTotalWaypoints = denseWaypoints.Count;
+
+        Debug.Log($"[{gameObject.name}] ══ NEW ROUTE ══ {routeStr} | {denseWaypoints.Count} wps");
     }
+
+    // =========================================================================
+    //  STUCK RECOVERY
+    // =========================================================================
 
     private void RecoverFromStuck()
     {
         pathRecalculations++;
         stuckCounter = 0;
+        Debug.LogWarning($"[{gameObject.name}] ⚠ Stuck {pathRecalculations}/{maxPathRecalculations}");
 
-        if (pathRecalculations >= MAX_RECALCULATIONS) { SnapToNearestReachableNode(); return; }
-
-        int snappedNode = FindNearestNodeWithLineOfSight();
-        if (snappedNode != -1) currentNodeID = snappedNode;
-
-        List<int> newPath = navSystem.FindPath(currentNodeID, destinationNodeID);
-        if (newPath != null && newPath.Count > 0)
+        int skip = Mathf.Min(waypointIndex + 3, denseWaypoints.Count - 1);
+        if (skip > waypointIndex)
         {
-            sourceNodeID = currentNodeID;
-            SaveRouteToVehicle(newPath, destinationNodeID);
+            waypointIndex = skip;
+            currentTarget = denseWaypoints[waypointIndex];
+            if (rb != null)
+                rb.MovePosition(rb.position +
+                                (currentTarget - transform.position).normalized * 0.8f);
+            return;
         }
-        else
+
+        if (pathRecalculations < maxPathRecalculations)
         {
-            sourceNodeID = currentNodeID;
-            PickNewDestinationAndSaveRoute();
+            int anchor = FindNearestNodeLoS();
+            if (anchor != -1) { sourceNodeID = anchor; currentNodeID = anchor; }
+            navSystem.ReleaseRoute(sourceNodeID, destinationNodeID);
+            ApplyRouteResult(navSystem.RequestReroute(currentNodeID, destinationNodeID));
+            return;
         }
+
+        Debug.LogError($"[{gameObject.name}] Max recalculations — full re-anchor.");
+        navSystem.ReleaseRoute(sourceNodeID, destinationNodeID);
+        int nearest = FindNearestNodeLoS();
+        if (nearest == -1) nearest = navSystem.GetClosestNode(transform.position);
+        if (nearest != -1) { sourceNodeID = nearest; currentNodeID = nearest; }
+        pathRecalculations = 0;
+        PickNewDestinationAndBuildRoute();
     }
 
-    private void FallbackPath()
+    private int FindNearestNodeLoS()
     {
-        // Try nearest reachable node first
-        int nearestReachable = FindNearestNodeWithLineOfSight();
-        if (nearestReachable != -1)
-        {
-            List<int> path = navSystem.FindPath(sourceNodeID, nearestReachable);
-            if (path != null && path.Count > 0) { SaveRouteToVehicle(path, nearestReachable); return; }
-        }
-
-        // Hard fallback: snap to closest node and immediately pick a fresh destination.
-        // Build a minimal synthetic route [closest] so savedRoutePath is never empty
-        // and the next FixedUpdate does not immediately re-trigger FallbackPath.
-        int nearest = navSystem.GetClosestNode(transform.position);
-        if (nearest == -1 || !navSystem.nodeMap.ContainsKey(nearest)) return;
-
-        sourceNodeID  = nearest;
-        currentNodeID = nearest;
-
-        // Synthetic single-node route keeps savedRoutePath valid while we search
-        savedRoutePath   = new List<int> { nearest };
-        currentPathIndex = 0;
-        SetTargetWaypoint(nearest);
-
-        if (!_isPickingDestination)
-            PickNewDestinationAndSaveRoute();
-    }
-
-    private int FindNearestNodeWithLineOfSight()
-    {
-        float bestDist   = float.MaxValue;
-        int   bestNode   = -1;
-        int   buildingMask = obstacleLayer & ~groundLayer;
+        float best = float.MaxValue; int bestNode = -1;
+        int   mask = detectionLayerMask & ~groundLayer;
 
         foreach (var kvp in navSystem.nodeMap)
         {
             if (kvp.Value == null) continue;
-            float dist = Vector3.Distance(transform.position, kvp.Value.transform.position);
+            Vector3 npos = kvp.Value.transform.position;
+            float   dist = Vector3.Distance(transform.position, npos);
             if (dist > 60f) continue;
 
             Vector3 from = transform.position + Vector3.up * 1.5f;
-            Vector3 to   = kvp.Value.transform.position + Vector3.up * 1f;
-            if (!Physics.Raycast(from, (to - from).normalized, Vector3.Distance(from, to), buildingMask) && dist < bestDist)
-            {
-                bestDist = dist;
-                bestNode = kvp.Key;
-            }
+            Vector3 to   = npos + Vector3.up * 1f;
+            float   len  = Vector3.Distance(from, to);
+
+            if (!Physics.Raycast(from, (to - from).normalized, len, mask) && dist < best)
+            { best = dist; bestNode = kvp.Key; }
         }
         return bestNode;
     }
 
-    private void SnapToNearestReachableNode()
-    {
-        int reachable = FindNearestNodeWithLineOfSight();
-        if (reachable == -1) reachable = navSystem.GetClosestNode(transform.position);
-
-        if (reachable != -1 && navSystem.nodeMap.ContainsKey(reachable))
-        {
-            sourceNodeID       = reachable;
-            currentNodeID      = reachable;
-            pathRecalculations = 0;
-            PickNewDestinationAndSaveRoute();
-        }
-    }
-
-    // ===================================================
-    // MOVE VEHICLE — slope-aware
-    // ===================================================
-
-    private void MoveVehicle()
-    {
-        if (targetWaypoint == null || rb == null || rb.isKinematic || currentSpeed < 0.1f) return;
-
-        // 1. Yaw toward waypoint (XZ only)
-        Vector3 toTargetXZ = new Vector3(
-            targetWaypoint.position.x - transform.position.x, 0f,
-            targetWaypoint.position.z - transform.position.z);
-
-        if (toTargetXZ.sqrMagnitude > 0.01f)
-        {
-            Quaternion targetYaw   = Quaternion.LookRotation(toTargetXZ, Vector3.up);
-            Quaternion currentYaw  = Quaternion.Euler(0f, transform.eulerAngles.y, 0f);
-            float turnMultiplier   = Mathf.Lerp(1f, 2.5f, angleToCurrentWaypoint / 180f);
-            Quaternion smoothedYaw = Quaternion.Slerp(currentYaw, targetYaw,
-                Time.fixedDeltaTime * turnSpeed * turnMultiplier);
-
-            // 2. Blend in slope tilt
-            Quaternion slopeTilt = Quaternion.FromToRotation(Vector3.up, groundNormal);
-            rb.MoveRotation(Quaternion.Slerp(rb.rotation, slopeTilt * smoothedYaw,
-                Time.fixedDeltaTime * slopeTiltSpeed));
-        }
-
-        // 3. Alignment scaling — slow when mis-aimed (prevents back-and-forth)
-        float alignFactor = Mathf.Clamp01(1f - Mathf.Clamp(angleToCurrentWaypoint, 0f, 180f) / 90f);
-        alignFactor       = Mathf.Max(alignFactor * alignFactor, 0.02f);
-
-        // 4. Drive forward
-        rb.MovePosition(rb.position + transform.forward * currentSpeed * alignFactor * Time.fixedDeltaTime);
-
-        // 5. Soft Y snap to ride height
-        if (isGrounded)
-        {
-            float yError = (currentGroundY + rideHeight) - rb.position.y;
-            if (Mathf.Abs(yError) > 0.05f)
-                rb.MovePosition(rb.position + Vector3.up * yError * groundSnapStrength * Time.fixedDeltaTime);
-        }
-    }
-
-    // ===================================================
-    // OBSTACLE DETECTION — slope-aware, terrain excluded
-    // ===================================================
-
-    private bool DetectObstacle()
-    {
-        Vector3 rayStart = transform.position + Vector3.up * 1.2f;
-        Vector3 rawFwd   = transform.forward;
-        Vector3 levelFwd = new Vector3(rawFwd.x, Mathf.Max(rawFwd.y, -0.15f), rawFwd.z).normalized;
-        int buildingMask = obstacleLayer & ~groundLayer;
-
-        if (Physics.Raycast(rayStart, levelFwd, out RaycastHit hit, detectionRange, buildingMask))
-        {
-            if (!hit.collider.transform.IsChildOf(transform))
-            {
-                TrafficVehicle other = hit.collider.GetComponent<TrafficVehicle>();
-                if (other != null && hit.distance < stoppingDistance)
-                {
-                    if (showDebugGizmos) Debug.DrawLine(rayStart, hit.point, Color.red);
-                    return true;
-                }
-                if (hit.collider.gameObject.layer != gameObject.layer && hit.distance < stoppingDistance * 0.5f)
-                {
-                    if (showDebugGizmos) Debug.DrawLine(rayStart, hit.point, Color.yellow);
-                    return true;
-                }
-            }
-        }
-
-        if (Physics.SphereCast(rayStart, 0.8f, levelFwd, out hit, detectionRange, buildingMask))
-        {
-            if (!hit.collider.transform.IsChildOf(transform))
-            {
-                TrafficVehicle other = hit.collider.GetComponent<TrafficVehicle>();
-                if (other != null && hit.distance < stoppingDistance) return true;
-            }
-        }
-
-        if (showDebugGizmos) Debug.DrawRay(rayStart, levelFwd * detectionRange, Color.green);
-        return false;
-    }
-
-    // ===================================================
-    // UTILITY
-    // ===================================================
-
-    private static float HorizontalDistance(Vector3 a, Vector3 b)
-    {
-        float dx = a.x - b.x;
-        float dz = a.z - b.z;
-        return Mathf.Sqrt(dx * dx + dz * dz);
-    }
-
-    // ===================================================
-    // DEBUG INFO
-    // ===================================================
+    // =========================================================================
+    //  DEBUG INFO
+    // =========================================================================
 
     private void UpdateDebugInfo()
     {
-        debugPathProgress       = currentPathIndex;
+        debugCurrentWaypoint    = waypointIndex;
+        debugNextWaypointIndex  = Mathf.Min(waypointIndex + 1,
+                                            (denseWaypoints?.Count ?? 1) - 1);
+        debugCurrentNodeID      = currentNodeID;
+        debugTotalWaypoints     = denseWaypoints?.Count ?? 0;
         debugCurrentSpeed       = currentSpeed;
-        debugProgressPercent    = savedRoutePath.Count > 0 ? (float)currentPathIndex / savedRoutePath.Count * 100f : 0f;
-        debugDistanceToWaypoint = targetWaypoint != null ? Vector3.Distance(transform.position, targetWaypoint.position) : 0f;
+        debugProgressPct        = debugTotalWaypoints > 0
+            ? (float)waypointIndex / debugTotalWaypoints * 100f : 0f;
+        debugDistanceToWaypoint = hasTarget
+            ? Vector3.Distance(transform.position, currentTarget) : 0f;
+        debugTargetPosition     = currentTarget;
 
         if (navSystem != null && navSystem.nodeMap.ContainsKey(destinationNodeID))
-            debugDistanceToDestination = Vector3.Distance(transform.position, navSystem.nodeMap[destinationNodeID].worldPosition);
+            debugDistToDest = Vector3.Distance(transform.position,
+                              navSystem.nodeMap[destinationNodeID].worldPosition);
 
-        if (savedRoutePath != null && savedRoutePath.Count > 0 && currentPathIndex < savedRoutePath.Count)
+        if (denseWaypoints != null && debugNextWaypointIndex < denseWaypoints.Count)
         {
-            int rem     = savedRoutePath.Count - currentPathIndex;
-            int preview = Mathf.Min(3, rem);
-            debugNextNodes = string.Join(" > ", savedRoutePath.Skip(currentPathIndex).Take(preview));
-            if (rem > preview) debugNextNodes += $" ... (+{rem - preview} more)";
+            debugNextNodeID = -1;
+            Vector3 nwp = denseWaypoints[debugNextWaypointIndex];
+            float best  = 2f;
+            foreach (var kvp in navSystem.nodeMap)
+            {
+                if (kvp.Value == null) continue;
+                float d = Vector3.Distance(nwp, kvp.Value.transform.position);
+                if (d < best) { best = d; debugNextNodeID = kvp.Key; }
+            }
         }
     }
 
-    // ===================================================
-    // GIZMOS
-    // ===================================================
+    // =========================================================================
+    //  GIZMOS
+    // =========================================================================
 
     private void OnDrawGizmos()
     {
         if (!showDebugGizmos || !Application.isPlaying || navSystem == null) return;
 
-        if (savedRoutePath != null && savedRoutePath.Count > 1)
+        if (denseWaypoints != null && denseWaypoints.Count > 1)
         {
-            for (int i = 0; i < savedRoutePath.Count - 1; i++)
+            for (int i = 0; i < denseWaypoints.Count - 1; i++)
             {
-                if (!navSystem.nodeMap.ContainsKey(savedRoutePath[i]) ||
-                    !navSystem.nodeMap.ContainsKey(savedRoutePath[i + 1])) continue;
-
-                Vector3 s = navSystem.nodeMap[savedRoutePath[i]].worldPosition + Vector3.up * 1.5f;
-                Vector3 e = navSystem.nodeMap[savedRoutePath[i + 1]].worldPosition + Vector3.up * 1.5f;
-                Gizmos.color = i < currentPathIndex ? new Color(0.5f, 0.5f, 0.5f, 0.5f) : debugColor;
-                Gizmos.DrawLine(s, e);
-                if (i >= currentPathIndex) Gizmos.DrawWireSphere(s, 0.5f);
+                Gizmos.color = i < waypointIndex
+                    ? new Color(0.35f, 0.35f, 0.35f, 0.25f)
+                    : new Color(_gizmoColor.r, _gizmoColor.g, _gizmoColor.b, 0.7f);
+                Gizmos.DrawLine(denseWaypoints[i]     + Vector3.up * 0.3f,
+                                denseWaypoints[i + 1] + Vector3.up * 0.3f);
+                if (i >= waypointIndex)
+                    Gizmos.DrawWireSphere(denseWaypoints[i] + Vector3.up * 0.3f, 0.15f);
             }
         }
 
-        if (targetWaypoint != null)
+        if (hasTarget)
         {
-            Gizmos.color = isStopped ? Color.red : (debugIsStuck ? Color.magenta : debugColor);
-            Gizmos.DrawLine(transform.position + Vector3.up, targetWaypoint.position + Vector3.up);
-            Gizmos.color = Color.yellow;
-            Gizmos.DrawWireSphere(targetWaypoint.position, waypointReachDistanceXZ);
+            Gizmos.color = isStopped ? Color.red : Color.cyan;
+            Gizmos.DrawLine(transform.position + Vector3.up * 0.8f,
+                            currentTarget + Vector3.up * 0.3f);
+            Gizmos.color = new Color(1f, 1f, 0f, 0.4f);
+            Gizmos.DrawWireSphere(currentTarget, waypointReachDistanceXZ * 0.5f);
+        }
+
+        if (_hitObject != null && _hitType != HitType.None)
+        {
+            switch (_hitType)
+            {
+                case HitType.NpcVehicle:
+                case HitType.PlayerVehicle:
+                    Gizmos.color = _hitDistance < vehicleStoppingDistance
+                                     ? Color.red : Color.yellow; break;
+                case HitType.TrafficLight: Gizmos.color = Color.cyan; break;
+                default:                   Gizmos.color = Color.red;  break;
+            }
+            Gizmos.DrawLine(transform.position + Vector3.up * 1.2f,
+                            _hitObject.transform.position + Vector3.up);
+            Gizmos.DrawWireSphere(_hitObject.transform.position + Vector3.up * 0.5f, 0.4f);
+        }
+
+        if (_currentLight != null)
+        {
+            Gizmos.color = _stoppedAtRed ? Color.red : Color.green;
+            Gizmos.DrawWireSphere(_currentLight.transform.position + Vector3.up, 1f);
         }
 
         if (navSystem.nodeMap.ContainsKey(destinationNodeID))
         {
             Vector3 dp = navSystem.nodeMap[destinationNodeID].worldPosition;
-            Gizmos.color = Color.magenta;
-            Gizmos.DrawWireSphere(dp + Vector3.up * 3f, 3f);
+            Gizmos.color = new Color(1f, 0f, 1f, 0.5f);
+            Gizmos.DrawWireSphere(dp + Vector3.up * 0.5f, 1.5f);
+            Gizmos.DrawLine(dp, dp + Vector3.up * 2.5f);
         }
 
-        if (currentTrafficLight != null)
+        if (isStuck)
         {
-            Gizmos.color = debugAtRedLight ? Color.red : Color.yellow;
-            Gizmos.DrawLine(transform.position + Vector3.up * 2f, currentTrafficLight.transform.position);
-        }
-
-        if (detectedVehicleAhead != null)
-        {
-            Gizmos.color = Color.cyan;
-            Gizmos.DrawLine(transform.position + Vector3.up * 1.5f,
-                            detectedVehicleAhead.transform.position + Vector3.up * 1.5f);
+            float flash = (Time.time * 4f) % 1f < 0.5f ? 1f : 0f;
+            Gizmos.color = new Color(1f, 0.5f * flash, 0f, 0.9f);
+            Gizmos.DrawWireSphere(transform.position + Vector3.up * 2.5f, 1f);
         }
 
         if (isGrounded)
         {
-            Gizmos.color = Color.white;
-            Gizmos.DrawRay(transform.position + Vector3.up * 0.3f, groundNormal * 2f);
-        }
+            Gizmos.color = new Color(1f, 1f, 0f, 0.9f);
+            Gizmos.DrawRay(groundHitPoint, groundNormal * 2f);
 
-        Gizmos.color = Color.blue;
-        Gizmos.DrawRay(transform.position + Vector3.up * 0.5f, transform.forward * 5f);
+            Gizmos.color = new Color(0f, 1f, 0.3f, 1f);
+            if (_wFL_hit) Gizmos.DrawSphere(_wFL_pt, 0.1f);
+            if (_wFR_hit) Gizmos.DrawSphere(_wFR_pt, 0.1f);
+            if (_wRL_hit) Gizmos.DrawSphere(_wRL_pt, 0.1f);
+            if (_wRR_hit) Gizmos.DrawSphere(_wRR_pt, 0.1f);
+
+            Gizmos.color = new Color(0f, 1f, 0.5f, 0.1f);
+            Gizmos.DrawWireSphere(transform.position, navMeshSampleRadius);
+        }
     }
 
     private void OnDrawGizmosSelected()
     {
 #if UNITY_EDITOR
-        if (!Application.isPlaying || targetWaypoint == null) return;
+        if (!Application.isPlaying) return;
 
-        string status     = debugIsStuck ? "STUCK" : (isStopped ? "STOPPED" : "MOVING");
-        string stopReason = "";
-        if (isStopped)
-        {
-            if (debugAtRedLight)                stopReason = " [RED LIGHT]";
-            else if (debugVehicleAheadDetected) stopReason = " [VEHICLE AHEAD]";
-            else if (debugIsObstacleDetected)   stopReason = " [OBSTACLE]";
-        }
+        string status = isStuck ? "STUCK" : (isStopped ? "STOPPED" : "MOVING");
+        string detail = _hitType != HitType.None ? $" [{_hitType} @ {debugHitDist:F1}m]" : "";
+        if (_stoppedAtRed) detail = " [RED LIGHT]";
 
         Handles.Label(
-            transform.position + Vector3.up * 7f,
-            $"{gameObject.name} {status}{stopReason}\n" +
-            $"Route: {sourceNodeID} > {destinationNodeID}  ({debugProgressPercent:F0}%)\n" +
-            $"Next: {debugNextNodes}\n" +
-            $"Speed: {debugCurrentSpeed:F1} m/s ({debugCurrentSpeed * 3.6f:F0} km/h)\n" +
-            $"Grounded: {debugIsGrounded}  Slope: {debugSlopeAngle:F1}\n" +
-            $"VehicleLayer mask: {vehicleLayerMask.value}\n" +
-            $"Traffic: {debugTrafficLightID} [{debugTrafficLightState}]\n" +
-            $"Vehicle ahead: {(detectedVehicleAhead != null ? $"YES {debugDistanceToVehicleAhead:F1}m" : "NO")}\n" +
-            $"WheelColliders:{debugWheelCollidersFound}  VisualWheels:{debugVisualWheelsFound}",
+            transform.position + Vector3.up * 6f,
+            $"{gameObject.name}  {status}{detail}\n" +
+            $"Route: {sourceNodeID} → {destinationNodeID}\n" +
+            $"WP: {debugCurrentWaypoint}/{debugTotalWaypoints}  ({debugProgressPct:F0}%)\n" +
+            $"Dist to dest: {debugDistToDest:F1} m\n" +
+            $"Speed: {debugCurrentSpeed:F1} m/s  ({debugCurrentSpeed * 3.6f:F0} km/h)\n" +
+            $"Steer: {currentSteerAngle:F1}°\n" +
+            $"Detection: {debugHitType}  @ {debugHitDist:F1} m\n" +
+            $"Light: {debugLightState}\n" +
+            $"Grounded: {debugGrounded}  [{debugGroundSource}]  Slope: {debugSlopeAngle:F1}°\n" +
+            $"Wheel Hits: {debugWheelHits}/4  Ground Y: {debugGroundY:F2}\n" +
+            $"NavMesh radius: {navMeshSampleRadius:F1} m\n" +
+            $"Recalcs: {pathRecalculations}/{maxPathRecalculations}",
             new GUIStyle
             {
                 normal    = new GUIStyleState { textColor = Color.white },
                 fontSize  = 11,
-                fontStyle = FontStyle.Bold
+                fontStyle = FontStyle.Bold,
             });
 #endif
+    }
+
+    // =========================================================================
+    //  UTILITY
+    // =========================================================================
+
+    private static float HorizontalDistance(Vector3 a, Vector3 b)
+    {
+        float dx = a.x - b.x, dz = a.z - b.z;
+        return Mathf.Sqrt(dx * dx + dz * dz);
     }
 }
