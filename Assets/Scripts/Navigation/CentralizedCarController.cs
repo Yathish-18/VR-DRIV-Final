@@ -14,6 +14,17 @@ public class CentralizedCarController : MonoBehaviour
     public float moveSpeed = 5f;
     public float rotationSpeed = 2f;
 
+    [Header("Path Visualization")]
+    [Tooltip("Update the line renderer every frame to trim it as the car advances. " +
+             "Uses the NavMesh hybrid dense route for accurate surface-following visualization.")]
+    public bool updateVisualizationEveryFrame = true;
+
+    [Tooltip("If non-zero, re-visualizes at this interval instead of every frame (cheaper). " +
+             "0 = every frame.")]
+    public float visualizationUpdateInterval = 0f;
+
+    private float _vizUpdateTimer = 0f;
+
     [Header("Dynamic Route Update")]
     public bool autoUpdateRoute = true;
     public float routeUpdateInterval = 3f;
@@ -99,6 +110,28 @@ public class CentralizedCarController : MonoBehaviour
                 routeUpdateTimer = 0f;
             }
         }
+
+        // ── Per-frame line renderer trim (NavMesh hybrid) ─────────────────────
+        // Keeps the line starting at the car's actual road position even when
+        // the car is between two far-apart nodes.
+        if (updateVisualizationEveryFrame && navSystem != null &&
+            currentPath != null && currentPath.Count > 0)
+        {
+            if (visualizationUpdateInterval <= 0f)
+            {
+                navSystem.VisualizePlayerPath(currentPath, transform.position);
+            }
+            else
+            {
+                _vizUpdateTimer += Time.deltaTime;
+                if (_vizUpdateTimer >= visualizationUpdateInterval)
+                {
+                    navSystem.VisualizePlayerPath(currentPath, transform.position);
+                    _vizUpdateTimer = 0f;
+                }
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
 
         if (!followPath) return;
         if (navSystem == null || rb == null || currentPath == null) return;
@@ -394,7 +427,9 @@ public class CentralizedCarController : MonoBehaviour
             Debug.Log($"[Car] Path found with {currentPath.Count} nodes: {pathStr}");
         }
 
-        navSystem.VisualizePath(currentPath);
+        // Invalidate cache so dense route is rebuilt for the new path
+        navSystem.InvalidatePlayerPathCache();
+        navSystem.VisualizePlayerPath(currentPath, transform.position);
     }
 
     private NavNode GetClosestNode()
