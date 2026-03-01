@@ -1,10 +1,31 @@
 // ============================================================================
-//  CENTRALIZED NAVIGATION SYSTEM
-//  • A* macro pathfinding over node graph
-//  • NavMesh segment baking → dense surface-following Vector3 waypoints
-//  • Per-segment route cache built at startup (spread over frames)
-//  • Single inspector source-of-truth for ALL shared NPC settings
-//  • Vehicles spawn only after cache is fully ready
+//  CENTRALIZED NAVIGATION SYSTEM  v7.0  —  OPTION 4
+//  ============================================================================
+//  STARTUP PIPELINE (Option 4):
+//
+//  EDITOR  (press button once, only after NavMesh changes):
+//    Phase 1 — NavMesh.CalculatePath() per direct connection
+//              Dense road-surface waypoints saved to NavRouteCacheAsset
+//
+//  RUNTIME (every Play session):
+//    Frame 0  — LoadSegmentsFromAsset()    ~0 ms   (dictionary fill)
+//    Frame 1  — BuildRoutePoolSync()       ~50 ms  (A* + cache stitch)
+//               Zero NavMesh calls — pure dictionary lookups
+//    Frame 1  — SpawnTrafficVehicles()
+//
+//  FALLBACK (no valid asset assigned):
+//    Original runtime coroutine runs as before — zero regression
+//
+//  WHY NavMesh BETWEEN NODES:
+//    Without NavMesh, NPC midway between two distant nodes has no idea
+//    the road curves — it aims straight at the destination and wanders off.
+//    NavMesh.CalculatePath() returns actual road-surface corners which we
+//    subdivide into dense waypoints so the NPC always has a nearby target.
+//
+//  WHY SEGMENTS ONLY IN ASSET:
+//    Segments depend on NavMesh geometry  → stale only when roads rebuild
+//    Routes   depend on node connections  → stale when ANY node/edge changes
+//    Routes compute < 100ms from cached segments → pointless to persist them
 // ============================================================================
 
 using UnityEngine;
@@ -24,226 +45,168 @@ public class CentralizedNavigationSystem : MonoBehaviour
     // =========================================================================
 
     [Header("═══════════════  GRAPH DATA  ═══════════════")]
-    public List<NavNode>             nodes               = new List<NavNode>();
+    public List<NavNode>              nodes                 = new List<NavNode>();
     public List<ConnectionDefinition> connectionDefinitions = new List<ConnectionDefinition>();
 
     [HideInInspector]
-    public Dictionary<int, NavNode>  nodeMap             = new Dictionary<int, NavNode>();
+    public Dictionary<int, NavNode> nodeMap = new Dictionary<int, NavNode>();
 
     public GameObject nodesParent;
 
     // =========================================================================
-    //  HYBRID NAVMESH ROUTE CACHE
+    //  SEGMENT CACHE ASSET  (Option 4)
     // =========================================================================
 
-    [Header("═══════════════  HYBRID ROUTE CACHE  ═══════════════")]
+    [Header("═══════════════  SEGMENT CACHE  ═══════════════")]
 
-    [Tooltip("Use NavMesh to bake dense surface-following waypoints between each pair of " +
-             "connected nodes. Requires a baked NavMesh on your road geometry.")]
+    [Tooltip("Pre-baked NavMesh segment data.\n\n" +
+             "SETUP:\n" +
+             "1. Assets → Create → Navigation → Nav Route Cache Asset\n" +
+             "2. Assign the .asset file here\n" +
+             "3. Press 'Bake & Save Segment Cache' in the inspector\n" +
+             "4. Press Play — NPCs spawn with no startup delay\n\n" +
+             "Re-bake only when NavMesh geometry changes (road mesh, terrain).\n" +
+             "Moving nodes or editing connections does NOT require re-baking.")]
+    public NavRouteCacheAsset routeCacheAsset;
+
+    [Tooltip("If true and a valid cache asset is assigned, load segments at startup\n" +
+             "instead of running NavMesh baking. Routes are always computed fresh.")]
+    public bool usePreBakedCache = true;
+
+    // =========================================================================
+    //  NAVMESH & WAYPOINT SETTINGS
+    // =========================================================================
+
+    [Header("═══════════════  NAVMESH SETTINGS  ═══════════════")]
+
+    [Tooltip("Use NavMesh to bake dense surface-following waypoints between nodes.\n" +
+             "Requires a baked NavMesh on your road geometry.\n" +
+             "Without this, NPCs wander when midway between distant nodes.")]
     public bool useNavMeshHybrid = true;
 
-    [Tooltip("Max distance between consecutive waypoints in the baked path. " +
-             "Smaller = smoother but more memory. 5-10 m is a good range.")]
+    [Tooltip("Maximum distance between consecutive waypoints (metres).\n" +
+             "Smaller = smoother road following but more memory. 5–10 m recommended.")]
     [Range(2f, 20f)]
     public float maxWaypointSpacing = 6f;
 
-    [Tooltip("Height added above every waypoint position so cars ride on top of the surface.")]
+    [Tooltip("Height added above every baked waypoint so cars sit on the surface.")]
     [Range(0f, 2f)]
     public float waypointHeightOffset = 0.15f;
 
-    [Tooltip("Layer(s) to raycast against when snapping interpolated waypoints to the road " +
-             "surface (used when NavMesh is unavailable for a segment).")]
+    [Tooltip("Layer(s) to raycast when snapping linear-fallback waypoints to the road.")]
     public LayerMask waypointSnapLayer = ~0;
 
-    [Tooltip("How many segments to bake per frame during startup. Higher = faster bake " +
-             "but may cause a brief frame hitch. 3-8 is recommended.")]
+    [Header("─── Runtime Fallback Baking (no valid asset) ───")]
+
+    [Tooltip("Segments baked per frame during runtime fallback. Higher = faster but may hitch.")]
     [Range(1, 20)]
     public int segmentsBakedPerFrame = 5;
 
-    [Tooltip("How many ready routes to pre-compute per source node during startup. More = more variety, higher startup cost. 5-10 is a good range.")]
+    [Tooltip("Routes pre-computed per source node during runtime fallback.")]
     [Range(1, 30)]
     public int routesPerSourceNode = 8;
 
-    [Tooltip("How many nodes to process per frame during route pre-computation Phase 2. 2-5 recommended.")]
+    [Tooltip("Nodes processed per frame during runtime route pre-computation.")]
     [Range(1, 20)]
     public int routesBakedPerFrame = 3;
 
-    /// <summary>
-    /// Segment-level cache: (fromNodeID, toNodeID) → dense surface waypoints.
-    /// Built once at startup; read-only during gameplay.
-    /// </summary>
+    // ─── Internal segment cache ───────────────────────────────────────────────
+    // Key: (fromNodeID, toNodeID) → dense road-surface Vector3 waypoints.
+    // Populated from asset on startup OR by NavMesh calls in runtime fallback.
+    // Read-only during gameplay. On-demand lazy baking for pool misses.
     private Dictionary<(int, int), Vector3[]> _segmentCache
         = new Dictionary<(int, int), Vector3[]>();
 
-    /// <summary>
-    /// True once PreBakeAllSegments coroutine has finished.
-    /// Vehicles are spawned only after this flag is set.
-    /// </summary>
+    // ─── Route pool ───────────────────────────────────────────────────────────
+    // sourceNodeID → list of pre-built full routes.
+    // Always built at runtime from _segmentCache. Never persisted to disk.
+    private Dictionary<int, List<RouteResult>> _routePool
+        = new Dictionary<int, List<RouteResult>>();
+
+    // ─── Route occupancy ──────────────────────────────────────────────────────
+    // (srcID, dstID) → number of active NPCs currently on that route.
+    // Capped at MAX_NPCS_PER_ROUTE for traffic variety.
+    private Dictionary<(int src, int dst), int> _routeOccupancy
+        = new Dictionary<(int, int), int>();
+
+    private const int MAX_NPCS_PER_ROUTE = 2;
+
+    /// <summary>True once both _segmentCache and _routePool are ready to use.</summary>
     public bool RouteCacheReady { get; private set; } = false;
 
     // =========================================================================
-    //  VEHICLE PREFABS & SPAWN SETTINGS
+    //  SPAWN SETTINGS
     // =========================================================================
 
     [Header("═══════════════  SPAWN SETTINGS  ═══════════════")]
     [SerializeField] private GameObject       npcVehiclePrefab;
-    [SerializeField] private List<GameObject> npcVariants         = new List<GameObject>();
-    [SerializeField] private int              totalTrafficVehicles = 15;
-    [SerializeField] private bool             spawnOnStart         = true;
-
-    [Tooltip("Minimum world-space gap between two spawned vehicles (metres).")]
-    [SerializeField] private float vehicleSpacing = 15f;
-
-    [Tooltip("Layer(s) considered road/ground for spawn-position raycasts.")]
-    [SerializeField] private LayerMask groundLayer = ~0;
-
-    [Tooltip("Extra Y added after the car is grounded at spawn. Usually 0.")]
-    [SerializeField] private float spawnHeightOffset = 0f;
+    [SerializeField] private List<GameObject> npcVariants          = new List<GameObject>();
+    [SerializeField] private int              totalTrafficVehicles  = 15;
+    [SerializeField] private bool             spawnOnStart          = true;
+    [SerializeField] private float            vehicleSpacing        = 15f;
+    [SerializeField] private LayerMask        groundLayer           = ~0;
+    [SerializeField] private float            spawnHeightOffset     = 0f;
 
     // =========================================================================
-    //  ★ CENTRALISED NPC CONFIGURATION
-    //    Every field here is pushed into TrafficVehicle.Initialize().
-    //    You never need to touch individual vehicle prefabs.
+    //  NPC SHARED SETTINGS
     // =========================================================================
 
     [Header("═══════════════  NPC — MOVEMENT  ═══════════════")]
-
-    [Tooltip("Base forward speed in m/s. Each vehicle varies ±15 % randomly.")]
-    [SerializeField] public float vehicleSpeed          = 12f;
-
-    [Tooltip("How sharply vehicles turn toward the next waypoint (higher = snappier).")]
-    [SerializeField] public float vehicleTurnSpeed      = 3f;
-
-    [Tooltip("Speed smoothing time. Smaller = more aggressive acceleration/braking.")]
+    [SerializeField] public float vehicleSpeed           = 12f;
+    [SerializeField] public float vehicleTurnSpeed       = 3f;
     [SerializeField] public float vehicleSpeedSmoothTime = 0.3f;
 
-    // ── Path constraints ──────────────────────────────────────────────────────
     [Header("═══════════════  NPC — PATH CONSTRAINTS  ═══════════════")]
-
-    [Tooltip("Minimum number of node-hops in a generated route. Prevents trivially short trips.")]
     [SerializeField] public int   minPathLength           = 5;
-
-    [Tooltip("Maximum number of node-hops allowed. Guards against excessively long routes.")]
     [SerializeField] public int   maxPathLength           = 30;
-
-    [Tooltip("Nearest a destination node may be to the source (world-space metres).")]
     [SerializeField] public float minDestinationDistance  = 50f;
-
-    [Tooltip("Furthest a destination node may be from the source (world-space metres).")]
     [SerializeField] public float maxDestinationDistance  = 300f;
-
-    [Tooltip("How many random destinations to try before falling back.")]
     [SerializeField] public int   maxPathAttempts         = 5;
 
-    // ── Waypoint reach thresholds ─────────────────────────────────────────────
     [Header("═══════════════  NPC — WAYPOINT REACH  ═══════════════")]
-
-    [Tooltip("XZ (horizontal) distance at which a waypoint is considered reached (metres).")]
     [SerializeField] public float waypointReachDistanceXZ = 4f;
-
-    [Tooltip("Maximum vertical difference allowed when evaluating waypoint reach on slopes.")]
     [SerializeField] public float waypointReachDistanceY  = 12f;
-
-    [Tooltip("Minimum seconds between consecutive waypoint advances (cascade guard).")]
     [SerializeField] public float minAdvanceInterval      = 0.15f;
 
-    // ── Obstacle & traffic detection ──────────────────────────────────────────
     [Header("═══════════════  NPC — DETECTION  ═══════════════")]
-
-    [Tooltip("Combined layer mask for ALL forward detection:\n" +
-             "• NPC vehicles (TrafficVehicle layer)\n" +
-             "• Player vehicle layer\n" +
-             "• Traffic lights layer\n" +
-             "• Static obstacles (walls, barriers)\n" +
-             "Do NOT include Road or Terrain.")]
     [SerializeField] public LayerMask detectionLayerMask;
-
-    [Tooltip("Layer that contains NPC traffic vehicles. Used to identify hits as NPCs.")]
     [SerializeField] public LayerMask npcVehicleLayer;
-
-    [Tooltip("Layer that contains the player vehicle. Used to identify hits as player.")]
     [SerializeField] public LayerMask playerVehicleLayer;
-
-    [Tooltip("Layer that contains traffic light colliders. Used to identify hits as lights.")]
     [SerializeField] public LayerMask trafficLightLayer;
+    [SerializeField] public float     detectionRange           = 20f;
+    [SerializeField] public float     vehicleStoppingDistance  = 10f;
+    [SerializeField] public float     obstacleStoppingDistance = 6f;
+    [SerializeField] public float     trafficLightStopDistance = 7f;
+    [SerializeField] public float     maxRedLightWaitTime      = 20f;
 
-    [Tooltip("How far ahead the single detection ray is cast (metres).")]
-    [SerializeField] public float detectionRange          = 20f;
-
-    [Tooltip("Distance at which a detected NPC/player vehicle causes a full stop.")]
-    [SerializeField] public float vehicleStoppingDistance = 10f;
-
-    [Tooltip("Distance at which a static obstacle causes a full stop.")]
-    [SerializeField] public float obstacleStoppingDistance = 6f;
-
-    [Tooltip("Distance at which the car stops behind a red traffic light.")]
-    [SerializeField] public float trafficLightStopDistance = 7f;
-
-    [Tooltip("Timeout (seconds) before ignoring a red light (stuck guard).")]
-    [SerializeField] public float maxRedLightWaitTime      = 20f;
-
-    // ── Ground / slope settings ───────────────────────────────────────────────
     [Header("═══════════════  NPC — GROUND & SLOPE  ═══════════════")]
+    [SerializeField] private GroundSurfaceType groundSurfaceType    = GroundSurfaceType.Road;
+    [SerializeField] private bool              overrideGroundLayer  = false;
+    [SerializeField] private LayerMask         groundLayerOverride  = 0;
+    [SerializeField] public  float groundRayUpOffset         = 3f;
+    [SerializeField] public  float groundRayDistance         = 15f;
+    [SerializeField] public  float vehicleRideHeight         = 0.5f;
+    [SerializeField] public  float vehicleGroundSnapStrength = 8f;
+    [SerializeField] public  float vehicleSlopeTiltSpeed     = 5f;
+    [SerializeField] public  float vehicleHillClimbBoost     = 1.4f;
 
-    [Tooltip("Surface type your roads sit on. Drives the ground layer sent to each vehicle.")]
-    [SerializeField] private GroundSurfaceType groundSurfaceType = GroundSurfaceType.Road;
-
-    [Tooltip("Enable to override the auto-resolved ground layer with a manual mask.")]
-    [SerializeField] private bool      overrideGroundLayer  = false;
-
-    [Tooltip("Manual ground layer mask (only used when Override Ground Layer is ticked).")]
-    [SerializeField] private LayerMask groundLayerOverride  = 0;
-
-    [Tooltip("How far above the vehicle pivot the ground-snap ray starts.")]
-    [SerializeField] public float groundRayUpOffset    = 3f;
-
-    [Tooltip("Maximum downward distance for the ground-snap ray.")]
-    [SerializeField] public float groundRayDistance    = 15f;
-
-    [Tooltip("Target ride height above the road surface in metres.")]
-    [SerializeField] public float vehicleRideHeight    = 0.5f;
-
-    [Tooltip("Strength of the per-frame Y correction toward ride height. 8-12 is typical.")]
-    [SerializeField] public float vehicleGroundSnapStrength = 8f;
-
-    [Tooltip("How fast the car tilts to match slope normals.")]
-    [SerializeField] public float vehicleSlopeTiltSpeed     = 5f;
-
-    [Tooltip("Speed multiplier when the next waypoint is above the vehicle (uphill).")]
-    [SerializeField] public float vehicleHillClimbBoost     = 1.4f;
-
-    // ── Stuck detection ───────────────────────────────────────────────────────
     [Header("═══════════════  NPC — STUCK DETECTION  ═══════════════")]
-
-    [Tooltip("Frames the vehicle must remain nearly stationary before 'stuck' recovery fires.")]
-    [SerializeField] public int   maxStuckFrames           = 300;
-
-    [Tooltip("Minimum XZ movement per frame below which the stuck counter increments (metres).")]
-    [SerializeField] public float stuckMovementThreshold   = 0.25f;
-
-    [Tooltip("How many path recalculations are allowed before the vehicle teleports to the " +
-             "nearest reachable node.")]
-    [SerializeField] public int   maxPathRecalculations    = 3;
-
-    // ── Route pool ────────────────────────────────────────────────────────────
-    [Header("═══════════════  NPC — ROUTE POOL  ═══════════════")]
-
-    // ── Debug ─────────────────────────────────────────────────────────────────
-    [Header("═══════════════  DEBUG  ═══════════════")]
-    [SerializeField] public bool showDebugGizmos = true;
+    [SerializeField] public int   maxStuckFrames         = 300;
+    [SerializeField] public float stuckMovementThreshold = 0.25f;
+    [SerializeField] public int   maxPathRecalculations  = 3;
 
     // =========================================================================
-    //  EDITOR UTILITIES (NODE CREATION / SNAPPING)
+    //  NODE TOOLS
     // =========================================================================
 
     [Header("═══════════════  NODE TOOLS  ═══════════════")]
-    public float autoConnectMaxDistance      = 20f;
-    public float newNodeDistance             = 15f;
+    public float     autoConnectMaxDistance  = 20f;
+    public float     newNodeDistance         = 15f;
     public LayerMask snapLayer               = ~0;
-    public float snapRaycastOriginHeight     = 50f;
-    public float snapNodeHeightOffset        = 0.05f;
-    public bool  snapAlignToSurface          = false;
-    public bool  autoSnapNewNodes            = false;
+    public float     snapRaycastOriginHeight = 50f;
+    public float     snapNodeHeightOffset    = 0.05f;
+    public bool      snapAlignToSurface      = false;
+    public bool      autoSnapNewNodes        = false;
 
     // =========================================================================
     //  PATH VISUALIZATION
@@ -256,11 +219,18 @@ public class CentralizedNavigationSystem : MonoBehaviour
     public float        pathLineHeightOffset          = 0.3f;
 
     // =========================================================================
-    //  LEGACY (kept for compatibility)
+    //  DEBUG
+    // =========================================================================
+
+    [Header("═══════════════  DEBUG  ═══════════════")]
+    [SerializeField] public bool showDebugGizmos = true;
+
+    // =========================================================================
+    //  LEGACY
     // =========================================================================
 
     [Header("═══════════════  LEGACY  ═══════════════")]
-    [Tooltip("Legacy chain system — not used with destination-based traffic.")]
+    [Tooltip("Legacy chain system — not used with the node-graph traffic system.")]
     public List<TrafficWaypointChain> trafficChains = new List<TrafficWaypointChain>();
 
     // =========================================================================
@@ -270,20 +240,9 @@ public class CentralizedNavigationSystem : MonoBehaviour
     private List<TrafficVehicle> activeVehicles = new List<TrafficVehicle>();
     private int nextNodeID = 0;
 
-    // ── Route Pool ────────────────────────────────────────────────────────────
-    // Pre-computed routes: sourceNodeID → list of ready RouteResults.
-    // Built entirely at startup. RequestRoute() is a pure pool lookup — zero A* at runtime.
-    private Dictionary<int, List<RouteResult>> _routePool
-        = new Dictionary<int, List<RouteResult>>();
-
-    // ── Route Occupancy ───────────────────────────────────────────────────────
-    // How many active NPCs are currently on each (src→dest) pair.
-    // Capped at MAX_NPCS_PER_ROUTE so the same route isn't given to every NPC.
-    // NPC calls ReleaseRoute() when it finishes or switches route.
-    private Dictionary<(int src, int dst), int> _routeOccupancy
-        = new Dictionary<(int, int), int>();
-
-    private const int MAX_NPCS_PER_ROUTE = 2;
+    // Player path visualization cache (used by CentralizedCarController)
+    private List<int>     _playerCachedNodePath   = null;
+    private List<Vector3> _playerCachedDenseRoute = null;
 
     // =========================================================================
     //  STRUCTS / ENUMS
@@ -291,16 +250,9 @@ public class CentralizedNavigationSystem : MonoBehaviour
 
     public enum GroundSurfaceType
     {
-        Default        = 0,
-        Road           = 1,
-        Terrain        = 2,
-        RoadAndTerrain = 3,
-        Custom         = 4,
+        Default = 0, Road = 1, Terrain = 2, RoadAndTerrain = 3, Custom = 4,
     }
 
-    /// <summary>
-    /// All shared ground/slope parameters passed to each TrafficVehicle at spawn.
-    /// </summary>
     [System.Serializable]
     public struct VehicleGroundConfig
     {
@@ -313,30 +265,20 @@ public class CentralizedNavigationSystem : MonoBehaviour
         public float     hillClimbBoost;
     }
 
-    /// <summary>
-    /// All shared NPC settings collected into one struct and pushed to each vehicle.
-    /// </summary>
     [System.Serializable]
     public struct VehicleSharedConfig
     {
-        // Movement
-        public float speed;
-        public float turnSpeed;
-        public float speedSmoothTime;
-
-        // Path constraints
-        public int   minPathLength;
-        public int   maxPathLength;
-        public float minDestinationDistance;
-        public float maxDestinationDistance;
-        public int   maxPathAttempts;
-
-        // Waypoint reach
-        public float waypointReachDistanceXZ;
-        public float waypointReachDistanceY;
-        public float minAdvanceInterval;
-
-        // Detection (unified single-ray system)
+        public float     speed;
+        public float     turnSpeed;
+        public float     speedSmoothTime;
+        public int       minPathLength;
+        public int       maxPathLength;
+        public float     minDestinationDistance;
+        public float     maxDestinationDistance;
+        public int       maxPathAttempts;
+        public float     waypointReachDistanceXZ;
+        public float     waypointReachDistanceY;
+        public float     minAdvanceInterval;
         public LayerMask detectionLayerMask;
         public LayerMask npcVehicleLayer;
         public LayerMask playerVehicleLayer;
@@ -346,14 +288,23 @@ public class CentralizedNavigationSystem : MonoBehaviour
         public float     obstacleStoppingDistance;
         public float     trafficLightStopDistance;
         public float     maxRedLightWaitTime;
+        public int       maxStuckFrames;
+        public float     stuckMovementThreshold;
+        public int       maxPathRecalculations;
+        public bool      showDebugGizmos;
+    }
 
-        // Stuck detection
-        public int   maxStuckFrames;
-        public float stuckMovementThreshold;
-        public int   maxPathRecalculations;
+    // =========================================================================
+    //  ROUTE RESULT  (returned to TrafficVehicle / CentralizedCarController)
+    // =========================================================================
 
-        // Debug
-        public bool showDebugGizmos;
+    public class RouteResult
+    {
+        public bool          success;
+        public int           sourceNodeID;
+        public int           destinationNodeID;
+        public List<Vector3> waypoints;
+        public string        failReason;
     }
 
     // =========================================================================
@@ -370,73 +321,122 @@ public class CentralizedNavigationSystem : MonoBehaviour
         ValidateAndRebuildGraph();
         SetupLineRenderer();
 
-        if (spawnOnStart && Application.isPlaying)
+        if (!spawnOnStart || !Application.isPlaying) return;
+        if (nodes.Count < 2)
         {
-            if (nodes.Count < 2)
-            {
-                Debug.LogError("[NavSystem] Need at least 2 nodes for traffic!");
-                return;
-            }
+            Debug.LogError("[NavSystem] Need at least 2 nodes for NPC traffic!");
+            return;
+        }
 
-            if (useNavMeshHybrid)
-                StartCoroutine(PreBakeAllSegmentsThenSpawn());
-            else
-            {
-                RouteCacheReady = true;
-                StartCoroutine(SpawnAfterDelay(0.5f));
-            }
+        // ── Path A: Pre-baked asset available → fast startup ──────────────────
+        if (usePreBakedCache && routeCacheAsset != null && routeCacheAsset.isValid)
+        {
+            StartCoroutine(StartupFromAsset());
+            return;
+        }
+
+        // ── Path B: No asset → runtime baking fallback ────────────────────────
+        LogFallbackReason();
+
+        if (useNavMeshHybrid)
+            StartCoroutine(RuntimeBakeThenSpawn());
+        else
+        {
+            RouteCacheReady = true;
+            StartCoroutine(SpawnAfterDelay(0.5f));
         }
     }
 
-    private IEnumerator SpawnAfterDelay(float delay)
+    private void LogFallbackReason()
     {
-        yield return new WaitForSeconds(delay);
+        if (routeCacheAsset == null)
+            Debug.LogWarning("[NavSystem] No NavRouteCacheAsset assigned. " +
+                             "Falling back to runtime baking (startup delay expected).\n" +
+                             "FIX → Assets → Create → Navigation → Nav Route Cache Asset\n" +
+                             "     Assign to this component, then press 'Bake & Save Segment Cache'.");
+        else if (!routeCacheAsset.isValid)
+            Debug.LogWarning("[NavSystem] Cache asset assigned but not yet baked. " +
+                             "Falling back to runtime baking.\n" +
+                             "FIX → Press 'Bake & Save Segment Cache' in the inspector.");
+    }
+
+    // =========================================================================
+    //  PATH A: STARTUP FROM PRE-BAKED ASSET
+    // =========================================================================
+
+    private IEnumerator StartupFromAsset()
+    {
+        // Step 1: Load segments — pure dictionary fill, instant
+        LoadSegmentsFromAsset();
+
+        // Warn on settings mismatch
+        if (!routeCacheAsset.SettingsMatch(maxWaypointSpacing, waypointHeightOffset))
+            Debug.LogWarning("[NavSystem] ⚠️  Bake settings differ from current settings " +
+                             "(maxWaypointSpacing or waypointHeightOffset changed). " +
+                             "Re-bake recommended for accurate waypoint density.");
+
+        if (routeCacheAsset.nodeCount != nodes.Count)
+            Debug.LogWarning($"[NavSystem] ⚠️  Node count differs from bake time " +
+                             $"(was {routeCacheAsset.nodeCount}, now {nodes.Count}). " +
+                             "Missing segments will be lazily baked via NavMesh at runtime.");
+
+        // Step 2: Yield so Unity finishes scene initialisation
+        yield return null;
+
+        // Step 3: Build route pool — no NavMesh, pure A* + cache lookups
+        float t0 = Time.realtimeSinceStartup;
+        BuildRoutePoolSync();
+        float ms = (Time.realtimeSinceStartup - t0) * 1000f;
+
+        RouteCacheReady = true;
+
+        int totalRoutes = _routePool.Values.Sum(v => v.Count);
+        Debug.Log($"[NavSystem] ✅ Option-4 startup complete — " +
+                  $"Segments: {_segmentCache.Count} loaded | " +
+                  $"Routes: {totalRoutes} across {_routePool.Count} nodes | " +
+                  $"Route-pool build: {ms:F1} ms");
+
+        // Step 4: Spawn NPCs
         SpawnTrafficVehicles();
     }
 
-    // =========================================================================
-    //  HYBRID: PRE-BAKE ALL SEGMENTS
-    // =========================================================================
-
-    private IEnumerator PreBakeAllSegmentsThenSpawn()
+    /// <summary>
+    /// Fills _segmentCache from the asset. Pure dictionary fill — microseconds.
+    /// </summary>
+    private void LoadSegmentsFromAsset()
     {
         _segmentCache.Clear();
+        int loaded = 0;
+
+        foreach (SerializedSegment seg in routeCacheAsset.segments)
+        {
+            if (seg == null || seg.waypoints == null || seg.waypoints.Length == 0) continue;
+            _segmentCache[(seg.fromID, seg.toID)] = seg.waypoints;
+            loaded++;
+        }
+
+        Debug.Log($"[NavSystem] Loaded {loaded} segments from asset.");
+    }
+
+    /// <summary>
+    /// Builds _routePool entirely from _segmentCache.
+    /// Uses A* for node-path discovery, then GetDenseRoute() for stitching.
+    /// No NavMesh calls. Runs synchronously — completes in one frame.
+    /// </summary>
+    private void BuildRoutePoolSync()
+    {
         _routePool.Clear();
-        RouteCacheReady = false;
 
-        // ── Phase 1: Bake NavMesh segments ───────────────────────────────────
-        var segments = new List<(int from, int to)>();
-        foreach (var conn in connectionDefinitions)
-        {
-            if (!nodeMap.ContainsKey(conn.fromNodeID) || !nodeMap.ContainsKey(conn.toNodeID)) continue;
-            segments.Add((conn.fromNodeID, conn.toNodeID));
-            if (conn.bidirectional) segments.Add((conn.toNodeID, conn.fromNodeID));
-        }
-
-        int segBaked = 0, segFailed = 0;
-        Debug.Log($"[NavSystem] ── Phase 1/2: Baking {segments.Count} NavMesh segments...");
-
-        for (int i = 0; i < segments.Count; i++)
-        {
-            var (from, to) = segments[i];
-            if (BakeAndCacheSegment(from, to)) segBaked++; else segFailed++;
-            if ((i + 1) % segmentsBakedPerFrame == 0) yield return null;
-        }
-        Debug.Log($"[NavSystem] Phase 1 done — {segBaked} NavMesh, {segFailed} fallback.");
-
-        // ── Phase 2: Pre-compute full A* routes for every source node ─────────
-        // NPCs call RequestRoute() → O(1) pool lookup. Zero A* at gameplay runtime.
         var allNodeIDs  = nodeMap.Keys.ToList();
-        int routesBaked = 0, processed = 0;
-        Debug.Log($"[NavSystem] ── Phase 2/2: Pre-computing routes " +
-                  $"({routesPerSourceNode} per node, {allNodeIDs.Count} nodes)...");
+        int routesBuilt = 0;
+        int emptyNodes  = 0;
 
         foreach (int srcID in allNodeIDs)
         {
             _routePool[srcID] = new List<RouteResult>();
             Vector3 srcPos    = nodeMap[srcID].worldPosition;
 
-            // Candidates in ideal distance range, shuffled for variety
+            // Prefer destinations in the ideal distance band
             var candidates = allNodeIDs
                 .Where(id => id != srcID)
                 .Select(id => (id, d: Vector3.Distance(srcPos, nodeMap[id].worldPosition)))
@@ -444,7 +444,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
                 .Select(t => t.id)
                 .ToList();
 
-            // Relax min if nothing in range
+            // Relax minimum if nothing in range
             if (candidates.Count == 0)
                 candidates = allNodeIDs
                     .Where(id => id != srcID)
@@ -460,23 +460,126 @@ public class CentralizedNavigationSystem : MonoBehaviour
                 if (_routePool[srcID].Count >= routesPerSourceNode) break;
 
                 List<int> nodePath = FindPath(srcID, destID);
-                if (nodePath == null || nodePath.Count < minPathLength
-                                     || nodePath.Count > maxPathLength) continue;
+                if (nodePath == null
+                 || nodePath.Count < minPathLength
+                 || nodePath.Count > maxPathLength) continue;
 
-                List<Vector3> waypoints = GetDenseRoute(nodePath);
-                if (waypoints == null || waypoints.Count < 2) continue;
+                List<Vector3> wps = GetDenseRoute(nodePath);
+                if (wps == null || wps.Count < 2) continue;
 
                 _routePool[srcID].Add(new RouteResult
                 {
                     success           = true,
                     sourceNodeID      = srcID,
                     destinationNodeID = destID,
-                    waypoints         = waypoints,
+                    waypoints         = wps,
+                });
+                routesBuilt++;
+            }
+
+            // Hard fallback: guarantee at least one route per node
+            if (_routePool[srcID].Count == 0)
+            {
+                int fallback = FindAnyReachableNode(srcID);
+                if (fallback != -1)
+                {
+                    List<int> fp = FindPath(srcID, fallback);
+                    if (fp != null && fp.Count >= 2)
+                    {
+                        List<Vector3> fw = GetDenseRoute(fp);
+                        if (fw != null && fw.Count >= 2)
+                        {
+                            _routePool[srcID].Add(new RouteResult
+                            {
+                                success           = true,
+                                sourceNodeID      = srcID,
+                                destinationNodeID = fallback,
+                                waypoints         = fw,
+                            });
+                            routesBuilt++;
+                        }
+                    }
+                }
+            }
+
+            if (_routePool[srcID].Count == 0) emptyNodes++;
+        }
+
+        if (emptyNodes > 0)
+            Debug.LogWarning($"[NavSystem] ⚠️  {emptyNodes} nodes have zero routes. " +
+                             "Check graph connectivity or re-bake if segments are missing.");
+    }
+
+    // =========================================================================
+    //  PATH B: RUNTIME BAKING FALLBACK  (original coroutine — unchanged)
+    // =========================================================================
+
+    private IEnumerator RuntimeBakeThenSpawn()
+    {
+        _segmentCache.Clear();
+        _routePool.Clear();
+        RouteCacheReady = false;
+
+        // ── Phase 1: NavMesh segment baking ───────────────────────────────────
+        var segments  = CollectSegmentPairs();
+        int segBaked  = 0, segFailed = 0;
+
+        Debug.Log($"[NavSystem] ── Runtime Phase 1/2: Baking {segments.Count} NavMesh segments...");
+
+        for (int i = 0; i < segments.Count; i++)
+        {
+            var (from, to) = segments[i];
+            if (BakeAndCacheSegment(from, to)) segBaked++; else segFailed++;
+            if ((i + 1) % segmentsBakedPerFrame == 0) yield return null;
+        }
+
+        Debug.Log($"[NavSystem] Phase 1 done — {segBaked} NavMesh, {segFailed} linear fallback.");
+
+        // ── Phase 2: Route pool ───────────────────────────────────────────────
+        var allNodeIDs  = nodeMap.Keys.ToList();
+        int routesBaked = 0, processed = 0;
+
+        Debug.Log($"[NavSystem] ── Runtime Phase 2/2: Building route pool...");
+
+        foreach (int srcID in allNodeIDs)
+        {
+            _routePool[srcID] = new List<RouteResult>();
+            Vector3 srcPos    = nodeMap[srcID].worldPosition;
+
+            var candidates = allNodeIDs
+                .Where(id => id != srcID)
+                .Select(id => (id, d: Vector3.Distance(srcPos, nodeMap[id].worldPosition)))
+                .Where(t => t.d >= minDestinationDistance && t.d <= maxDestinationDistance)
+                .Select(t => t.id)
+                .ToList();
+
+            if (candidates.Count == 0)
+                candidates = allNodeIDs
+                    .Where(id => id != srcID)
+                    .Select(id => (id, d: Vector3.Distance(srcPos, nodeMap[id].worldPosition)))
+                    .Where(t => t.d <= maxDestinationDistance)
+                    .Select(t => t.id)
+                    .ToList();
+
+            Shuffle(candidates);
+
+            foreach (int destID in candidates)
+            {
+                if (_routePool[srcID].Count >= routesPerSourceNode) break;
+                List<int> nodePath = FindPath(srcID, destID);
+                if (nodePath == null || nodePath.Count < minPathLength
+                                     || nodePath.Count > maxPathLength) continue;
+                List<Vector3> wps = GetDenseRoute(nodePath);
+                if (wps == null || wps.Count < 2) continue;
+                _routePool[srcID].Add(new RouteResult
+                {
+                    success = true, sourceNodeID = srcID,
+                    destinationNodeID = destID, waypoints = wps,
                 });
                 routesBaked++;
             }
 
-            // Hard fallback: if still empty, take ANY reachable neighbor
+            // Fallback
             if (_routePool[srcID].Count == 0)
             {
                 int fb = FindAnyReachableNode(srcID);
@@ -506,236 +609,380 @@ public class CentralizedNavigationSystem : MonoBehaviour
         int emptyNodes = _routePool.Values.Count(p => p.Count == 0);
         RouteCacheReady = true;
 
-        Debug.Log($"[NavSystem] ✅ ALL READY — " +
-                  $"{routesBaked} routes pre-computed across {allNodeIDs.Count} nodes. " +
-                  $"Segments: {segBaked} NavMesh + {segFailed} fallback. " +
-                  $"Nodes with no route: {emptyNodes}");
+        Debug.Log($"[NavSystem] ✅ Runtime bake done — {routesBaked} routes built, " +
+                  $"{emptyNodes} nodes unreachable.");
 
         if (emptyNodes > 0)
-            Debug.LogWarning($"[NavSystem] ⚠️ {emptyNodes} nodes unreachable. " +
-                             "Check node graph connectivity.");
+            Debug.LogWarning($"[NavSystem] ⚠️  {emptyNodes} nodes have no routes. " +
+                             "Check graph connectivity.");
 
         yield return new WaitForSeconds(0.3f);
         SpawnTrafficVehicles();
     }
 
+    private IEnumerator SpawnAfterDelay(float delay)
+    {
+        yield return new WaitForSeconds(delay);
+        SpawnTrafficVehicles();
+    }
+
+    // =========================================================================
+    //  EDITOR BAKING  (synchronous, progress bar)
+    // =========================================================================
+
+#if UNITY_EDITOR
     /// <summary>
-    /// Bakes one directed segment into the cache.
-    /// Returns true if NavMesh succeeded, false if linear fallback was used.
+    /// Called by the inspector "Bake and Save Segment Cache" button.
+    /// Runs synchronously in the editor with a cancellable progress bar.
+    /// Saves ALL NavMesh segments into routeCacheAsset (segments only).
+    /// Routes are NOT saved — they are always computed fresh at runtime.
+    /// </summary>
+    public void EditorBakeSegmentCache()
+    {
+        if (routeCacheAsset == null)
+        {
+            EditorUtility.DisplayDialog(
+                "No Cache Asset Assigned",
+                "Please create and assign a NavRouteCacheAsset first.\n\n" +
+                "Assets → Create → Navigation → Nav Route Cache Asset\n" +
+                "Then drag it onto the 'Route Cache Asset' field on this component.",
+                "OK");
+            return;
+        }
+
+        ValidateAndRebuildGraph();
+
+        if (nodes.Count < 2)
+        {
+            EditorUtility.DisplayDialog("Not Enough Nodes",
+                "Need at least 2 nodes to bake segments.", "OK");
+            return;
+        }
+
+        // Collect all segment pairs
+        var segments = CollectSegmentPairs();
+
+        if (segments.Count == 0)
+        {
+            EditorUtility.DisplayDialog("No Connections",
+                "No connections found. Add connections between nodes first.", "OK");
+            return;
+        }
+
+        // Confirm
+        bool proceed = EditorUtility.DisplayDialog(
+            "Bake Segment Cache",
+            $"This will bake {segments.Count} NavMesh segments " +
+            $"({connectionDefinitions.Count} connections) into '{routeCacheAsset.name}'.\n\n" +
+            "Requirements:\n" +
+            "  • NavMesh must be baked for this scene\n" +
+            "  • Road geometry must be on a NavMesh-walkable layer\n\n" +
+            "Segments only — routes are always computed fresh at runtime.\n\n" +
+            "Continue?",
+            "Bake", "Cancel");
+
+        if (!proceed) return;
+
+        // Clear asset
+        Undo.RecordObject(routeCacheAsset, "Bake Segment Cache");
+        routeCacheAsset.Clear();
+
+        // Clear local segment cache so Phase 2 can use fresh data
+        _segmentCache.Clear();
+
+        int segBaked = 0, segFailed = 0;
+
+        for (int i = 0; i < segments.Count; i++)
+        {
+            var (from, to) = segments[i];
+
+            float progress = (float)i / segments.Count;
+            bool cancelled = EditorUtility.DisplayCancelableProgressBar(
+                "Baking Segment Cache",
+                $"Segment {i + 1}/{segments.Count}  ({from} → {to})",
+                progress);
+
+            if (cancelled)
+            {
+                EditorUtility.ClearProgressBar();
+                Debug.LogWarning("[NavSystem] Segment cache bake CANCELLED. " +
+                                 "Asset not saved — re-bake to get a valid cache.");
+                return;
+            }
+
+            Vector3[] wps = EditorBakeOneSegment(from, to);
+
+            // Cache locally for any debug use
+            _segmentCache[(from, to)] = wps;
+
+            routeCacheAsset.segments.Add(new SerializedSegment
+            {
+                fromID    = from,
+                toID      = to,
+                waypoints = wps,
+            });
+
+            if (wps.Length > 0) segBaked++; else segFailed++;
+        }
+
+        EditorUtility.ClearProgressBar();
+
+        // Write metadata
+        routeCacheAsset.isValid              = segBaked > 0;
+        routeCacheAsset.bakedAt              = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        routeCacheAsset.sceneName            = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+        routeCacheAsset.nodeCount            = nodes.Count;
+        routeCacheAsset.connectionCount      = connectionDefinitions.Count;
+        routeCacheAsset.segmentCount         = routeCacheAsset.segments.Count;
+        routeCacheAsset.bakedWaypointSpacing = maxWaypointSpacing;
+        routeCacheAsset.bakedHeightOffset    = waypointHeightOffset;
+
+        EditorUtility.SetDirty(routeCacheAsset);
+        UnityEditor.AssetDatabase.SaveAssets();
+        UnityEditor.AssetDatabase.Refresh();
+
+        string assetPath = UnityEditor.AssetDatabase.GetAssetPath(routeCacheAsset);
+        Debug.Log($"[NavSystem] ✅ Segment cache bake complete — " +
+                  $"{segBaked} NavMesh, {segFailed} linear-fallback | " +
+                  $"Saved to: {assetPath}");
+
+        EditorUtility.DisplayDialog(
+            "Bake Complete ✅",
+            $"Segment cache saved successfully!\n\n" +
+            $"NavMesh segments:  {segBaked}\n" +
+            $"Linear fallbacks:  {segFailed}\n" +
+            $"Total segments:    {segBaked + segFailed}\n" +
+            $"Baked at:          {routeCacheAsset.bakedAt}\n\n" +
+            (segFailed > 0
+                ? $"⚠️  {segFailed} segment(s) used linear fallback.\n" +
+                  "Make sure those connections have road mesh baked into the NavMesh."
+                : "All segments used NavMesh — perfect road following."),
+            "OK");
+    }
+
+    /// <summary>
+    /// Bake a single segment synchronously in the editor.
+    /// Returns a non-null Vector3[] (may be empty on total failure).
+    /// </summary>
+    private Vector3[] EditorBakeOneSegment(int fromID, int toID)
+    {
+        if (!nodeMap.ContainsKey(fromID) || !nodeMap.ContainsKey(toID))
+            return new Vector3[0];
+
+        Vector3 fromPos = nodeMap[fromID].transform.position;
+        Vector3 toPos   = nodeMap[toID].transform.position;
+
+        var nmPath = new NavMeshPath();
+        bool ok = NavMesh.CalculatePath(fromPos, toPos, NavMesh.AllAreas, nmPath)
+               && nmPath.status == NavMeshPathStatus.PathComplete
+               && nmPath.corners.Length >= 2;
+
+        if (ok) return SubdivideAndLift(nmPath.corners);
+
+        Debug.LogWarning($"[NavSystem] NavMesh failed {fromID}→{toID} " +
+                         $"(status={nmPath.status}). Using linear fallback.");
+        return BuildLinearSegment(fromPos, toPos);
+    }
+
+    /// <summary>Clear the cache asset and mark it invalid.</summary>
+    public void EditorClearSegmentCache()
+    {
+        if (routeCacheAsset == null) return;
+        Undo.RecordObject(routeCacheAsset, "Clear Segment Cache");
+        routeCacheAsset.Clear();
+        EditorUtility.SetDirty(routeCacheAsset);
+        UnityEditor.AssetDatabase.SaveAssets();
+        Debug.Log("[NavSystem] Segment cache cleared and marked invalid.");
+    }
+#endif
+
+    // =========================================================================
+    //  SEGMENT BAKING HELPERS  (used by both editor and runtime fallback)
+    // =========================================================================
+
+    /// <summary>Returns all (from, to) pairs from connectionDefinitions.</summary>
+    private List<(int from, int to)> CollectSegmentPairs()
+    {
+        var result = new List<(int, int)>();
+        foreach (var conn in connectionDefinitions)
+        {
+            if (!nodeMap.ContainsKey(conn.fromNodeID) || !nodeMap.ContainsKey(conn.toNodeID)) continue;
+            result.Add((conn.fromNodeID, conn.toNodeID));
+            if (conn.bidirectional) result.Add((conn.toNodeID, conn.fromNodeID));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Bakes a single segment via NavMesh (or linear fallback) and stores in _segmentCache.
+    /// Returns true if NavMesh succeeded.
     /// </summary>
     private bool BakeAndCacheSegment(int fromID, int toID)
     {
         Vector3 fromPos = nodeMap[fromID].transform.position;
         Vector3 toPos   = nodeMap[toID].transform.position;
 
-        // Try NavMesh first
-        NavMeshPath nmPath = new NavMeshPath();
-        bool navMeshOk = NavMesh.CalculatePath(fromPos, toPos, NavMesh.AllAreas, nmPath)
-                      && nmPath.status == NavMeshPathStatus.PathComplete
-                      && nmPath.corners.Length >= 2;
+        var  nmPath = new NavMeshPath();
+        bool ok = NavMesh.CalculatePath(fromPos, toPos, NavMesh.AllAreas, nmPath)
+               && nmPath.status == NavMeshPathStatus.PathComplete
+               && nmPath.corners.Length >= 2;
 
-        Vector3[] waypoints;
-        if (navMeshOk)
-        {
-            waypoints = SubdivideAndLiftCorners(nmPath.corners);
-        }
-        else
-        {
-            // Fallback: linearly interpolated + ground-snapped waypoints
-            waypoints = BuildLinearFallbackSegment(fromPos, toPos);
-            if (nmPath.status != NavMeshPathStatus.PathComplete)
-                Debug.LogWarning($"[NavSystem] NavMesh failed {fromID}→{toID} " +
-                                 $"(status={nmPath.status}). Using linear fallback.");
-        }
+        Vector3[] wps = ok
+            ? SubdivideAndLift(nmPath.corners)
+            : BuildLinearSegment(fromPos, toPos);
 
-        _segmentCache[(fromID, toID)] = waypoints;
-        return navMeshOk;
+        if (!ok)
+            Debug.LogWarning($"[NavSystem] NavMesh failed {fromID}→{toID} " +
+                             $"(status={nmPath.status}). Using linear fallback.");
+
+        _segmentCache[(fromID, toID)] = wps;
+        return ok;
     }
 
-    /// <summary>
-    /// Takes raw NavMesh corners, subdivides any gap larger than maxWaypointSpacing,
-    /// and lifts every point by waypointHeightOffset.
-    /// </summary>
-    private Vector3[] SubdivideAndLiftCorners(Vector3[] corners)
+    private Vector3[] SubdivideAndLift(Vector3[] corners)
     {
         var pts = new List<Vector3>();
         for (int i = 0; i < corners.Length - 1; i++)
         {
-            Vector3 a = corners[i];
-            Vector3 b = corners[i + 1];
-            pts.Add(Lift(a));
-
-            float segLen  = Vector3.Distance(a, b);
-            int   divs    = Mathf.FloorToInt(segLen / maxWaypointSpacing);
+            Vector3 a = corners[i], b = corners[i + 1];
+            pts.Add(LiftPoint(a));
+            int divs = Mathf.FloorToInt(Vector3.Distance(a, b) / maxWaypointSpacing);
             for (int s = 1; s < divs; s++)
-            {
-                float t     = (float)s / divs;
-                Vector3 mid = Vector3.Lerp(a, b, t);
-                pts.Add(Lift(mid));
-            }
+                pts.Add(LiftPoint(Vector3.Lerp(a, b, (float)s / divs)));
         }
-        pts.Add(Lift(corners[corners.Length - 1]));
+        pts.Add(LiftPoint(corners[corners.Length - 1]));
         return pts.ToArray();
     }
 
-    /// <summary>
-    /// Builds a ground-snapped linear path for segments where NavMesh is unavailable.
-    /// </summary>
-    private Vector3[] BuildLinearFallbackSegment(Vector3 from, Vector3 to)
+    private Vector3[] BuildLinearSegment(Vector3 from, Vector3 to)
     {
-        var pts  = new List<Vector3>();
-        float dist = Vector3.Distance(from, to);
-        int   divs = Mathf.Max(2, Mathf.CeilToInt(dist / maxWaypointSpacing));
-
+        int divs = Mathf.Max(2, Mathf.CeilToInt(Vector3.Distance(from, to) / maxWaypointSpacing));
+        var pts  = new Vector3[divs + 1];
         for (int i = 0; i <= divs; i++)
-        {
-            float   t   = (float)i / divs;
-            Vector3 pos = Vector3.Lerp(from, to, t);
-            pos = SnapToWaypointSurface(pos);
-            pts.Add(pos);
-        }
-        return pts.ToArray();
+            pts[i] = SnapToSurface(Vector3.Lerp(from, to, (float)i / divs));
+        return pts;
     }
 
-    private Vector3 SnapToWaypointSurface(Vector3 pos)
+    private Vector3 LiftPoint(Vector3 v) => v + Vector3.up * waypointHeightOffset;
+
+    private Vector3 SnapToSurface(Vector3 pos)
     {
-        Vector3 origin = pos + Vector3.up * 10f;
-        if (Physics.Raycast(origin, Vector3.down, out RaycastHit hit, 20f, waypointSnapLayer))
+        if (Physics.Raycast(pos + Vector3.up * 10f, Vector3.down, out RaycastHit hit, 20f, waypointSnapLayer))
             return hit.point + Vector3.up * waypointHeightOffset;
         return pos + Vector3.up * waypointHeightOffset;
     }
 
-    private Vector3 Lift(Vector3 v) => v + Vector3.up * waypointHeightOffset;
-
     // =========================================================================
-    //  ROUTE RESULT & REQUEST API
-    // =========================================================================
-
-    public class RouteResult
-    {
-        public bool          success;
-        public int           sourceNodeID;
-        public int           destinationNodeID;
-        public List<Vector3> waypoints;
-        public string        failReason;
-    }
-
-    // =========================================================================
-    //  PUBLIC: ROUTE REQUEST API
-    //
-    //  RequestRoute(fromNodeID)
-    //      → Pulls from pre-computed pool (zero A* at runtime)
-    //      → Respects MAX_NPCS_PER_ROUTE occupancy per route pair
-    //      → Falls back to live compute only if pool is empty/exhausted
-    //
-    //  RequestReroute(fromNodeID, toNodeID)
-    //      → Used by stuck NPCs to re-anchor and resume toward same dest
-    //
-    //  ReleaseRoute(srcNodeID, dstNodeID)
-    //      → NPC MUST call this when it finishes or abandons a route
-    //        so the occupancy slot is freed for other NPCs
+    //  DENSE ROUTE STITCHING
     // =========================================================================
 
     /// <summary>
-    /// Primary route request. Returns a pre-baked route from the pool instantly.
-    /// No A* runs at runtime unless the pool for this node is exhausted.
+    /// Stitches pre-baked segments together into one continuous waypoint list.
+    /// If a segment is missing, it is lazily baked on-demand via NavMesh (or linear fallback).
+    /// </summary>
+    public List<Vector3> GetDenseRoute(List<int> nodePath)
+    {
+        var full = new List<Vector3>();
+        if (nodePath == null || nodePath.Count < 2) return full;
+
+        for (int i = 0; i < nodePath.Count - 1; i++)
+        {
+            int from = nodePath[i], to = nodePath[i + 1];
+
+            if (!_segmentCache.TryGetValue((from, to), out Vector3[] seg))
+            {
+                // Lazy bake — happens only for segments not in asset (e.g. new node added)
+                Debug.LogWarning($"[NavSystem] Segment {from}→{to} not in cache — lazy baking via NavMesh.");
+                BakeAndCacheSegment(from, to);
+                seg = _segmentCache[(from, to)];
+            }
+
+            if (seg.Length == 0) continue;
+
+            // Skip first point of subsequent segments to avoid duplicates at junction
+            int startIdx = (full.Count > 0) ? 1 : 0;
+            for (int j = startIdx; j < seg.Length; j++)
+                full.Add(seg[j]);
+        }
+
+        return full;
+    }
+
+    // =========================================================================
+    //  ROUTE REQUEST API  (called by TrafficVehicle and CentralizedCarController)
+    // =========================================================================
+
+    /// <summary>
+    /// Returns a pre-built route from the pool for the given source node.
+    /// O(1) pool lookup — no A*, no NavMesh at runtime.
+    /// Falls back to live computation if pool is empty.
     /// </summary>
     public RouteResult RequestRoute(int fromNodeID)
     {
-        // Validate source node
         if (!nodeMap.ContainsKey(fromNodeID))
         {
             fromNodeID = GetClosestNode(Vector3.zero);
             if (fromNodeID == -1) return Fail("No nodes in map.");
         }
 
-        // ── Step 1: Try pool (pre-baked routes, randomised order) ────────────
-        if (_routePool.TryGetValue(fromNodeID, out var poolEntries) && poolEntries.Count > 0)
+        if (_routePool.TryGetValue(fromNodeID, out var pool) && pool.Count > 0)
         {
-            // Shuffle pool order so NPCs don't all pick the same first entry
-            var shuffled = poolEntries.ToList();
+            var shuffled = pool.ToList();
             Shuffle(shuffled);
 
-            foreach (var candidate in shuffled)
-            {
-                var key = (candidate.sourceNodeID, candidate.destinationNodeID);
-
-                // Skip if this route already has too many NPCs on it
-                _routeOccupancy.TryGetValue(key, out int occupants);
-                if (occupants >= MAX_NPCS_PER_ROUTE) continue;
-
-                // Claim the slot
-                _routeOccupancy[key] = occupants + 1;
-
-                // Return a fresh copy so each NPC owns its own waypoint list
-                return new RouteResult
-                {
-                    success           = true,
-                    sourceNodeID      = candidate.sourceNodeID,
-                    destinationNodeID = candidate.destinationNodeID,
-                    waypoints         = new List<Vector3>(candidate.waypoints),
-                };
-            }
-
-            // All pool routes are fully occupied — relax to 1 extra NPC per route
-            // rather than leaving the NPC stranded
+            // Prefer under-occupied routes
             foreach (var candidate in shuffled)
             {
                 var key = (candidate.sourceNodeID, candidate.destinationNodeID);
                 _routeOccupancy.TryGetValue(key, out int occ);
+                if (occ >= MAX_NPCS_PER_ROUTE) continue;
                 _routeOccupancy[key] = occ + 1;
-
-                Debug.LogWarning($"[NavSystem] All routes from node {fromNodeID} at capacity. " +
-                                 $"Allowing extra NPC on {candidate.sourceNodeID}→{candidate.destinationNodeID}.");
-
-                return new RouteResult
-                {
-                    success           = true,
-                    sourceNodeID      = candidate.sourceNodeID,
-                    destinationNodeID = candidate.destinationNodeID,
-                    waypoints         = new List<Vector3>(candidate.waypoints),
-                };
+                return CloneResult(candidate);
             }
+
+            // All routes at capacity — allow overflow rather than returning null
+            var overflow = shuffled[0];
+            var okey     = (overflow.sourceNodeID, overflow.destinationNodeID);
+            _routeOccupancy.TryGetValue(okey, out int oocc);
+            _routeOccupancy[okey] = oocc + 1;
+            Debug.LogWarning($"[NavSystem] All routes from node {fromNodeID} at max occupancy. " +
+                             "Allowing overflow NPC.");
+            return CloneResult(overflow);
         }
 
-        // ── Step 2: Pool miss — compute live (startup may have missed this node) ─
-        Debug.LogWarning($"[NavSystem] Pool miss for node {fromNodeID}. Computing live route.");
+        // Pool miss — compute live
+        Debug.LogWarning($"[NavSystem] Route pool miss for node {fromNodeID}. " +
+                         "Computing live (may cause brief hitch). " +
+                         "Consider increasing routesPerSourceNode.");
         return ComputeRouteLive(fromNodeID);
     }
 
     /// <summary>
-    /// Reroute a stuck NPC toward its existing destination from a new anchor node.
-    /// Tries pool first, then live compute, then full new route.
+    /// Returns a pre-built or freshly computed route from srcNode to a specific destination.
+    /// Used for rerouting after a stuck event.
     /// </summary>
     public RouteResult RequestReroute(int fromNodeID, int toNodeID)
     {
         if (!nodeMap.ContainsKey(fromNodeID)) return RequestRoute(fromNodeID);
         if (!nodeMap.ContainsKey(toNodeID))   return RequestRoute(fromNodeID);
 
-        // Try pool for this specific (from→to) pair
-        if (_routePool.TryGetValue(fromNodeID, out var entries))
+        if (_routePool.TryGetValue(fromNodeID, out var pool))
         {
-            var match = entries.FirstOrDefault(r => r.destinationNodeID == toNodeID);
+            var match = pool.FirstOrDefault(r => r.destinationNodeID == toNodeID);
             if (match != null)
             {
                 var key = (fromNodeID, toNodeID);
                 _routeOccupancy.TryGetValue(key, out int occ);
                 _routeOccupancy[key] = occ + 1;
-                return new RouteResult
-                {
-                    success           = true,
-                    sourceNodeID      = match.sourceNodeID,
-                    destinationNodeID = match.destinationNodeID,
-                    waypoints         = new List<Vector3>(match.waypoints),
-                };
+                return CloneResult(match);
             }
         }
 
-        // Live compute for this specific pair
-        List<int> nodePath = FindPath(fromNodeID, toNodeID);
-        if (nodePath != null && nodePath.Count >= 2)
+        // Not in pool — compute directly
+        List<int> path = FindPath(fromNodeID, toNodeID);
+        if (path != null && path.Count >= 2)
         {
-            List<Vector3> wps = GetDenseRoute(nodePath);
+            List<Vector3> wps = GetDenseRoute(path);
             if (wps != null && wps.Count >= 2)
             {
                 var key = (fromNodeID, toNodeID);
@@ -749,41 +996,36 @@ public class CentralizedNavigationSystem : MonoBehaviour
             }
         }
 
-        // Destination unreachable from new anchor — pick entirely new route
         return RequestRoute(fromNodeID);
     }
 
     /// <summary>
-    /// NPC calls this when it finishes a route or switches to a new one.
-    /// Frees the occupancy slot so another NPC can use this route.
+    /// Decrements occupancy count when an NPC finishes or abandons a route.
+    /// Call from TrafficVehicle when switching routes.
     /// </summary>
     public void ReleaseRoute(int srcNodeID, int dstNodeID)
     {
         var key = (srcNodeID, dstNodeID);
-        if (_routeOccupancy.TryGetValue(key, out int occ))
-        {
-            int next = occ - 1;
-            if (next <= 0) _routeOccupancy.Remove(key);
-            else           _routeOccupancy[key] = next;
-        }
+        if (!_routeOccupancy.TryGetValue(key, out int occ)) return;
+        if (occ <= 1) _routeOccupancy.Remove(key);
+        else          _routeOccupancy[key] = occ - 1;
     }
-
-    // ── Live compute (fallback only — should rarely run during gameplay) ──────
 
     private RouteResult ComputeRouteLive(int fromNodeID)
     {
-        if (!nodeMap.ContainsKey(fromNodeID)) return Fail($"Node {fromNodeID} not in map.");
+        if (!nodeMap.ContainsKey(fromNodeID))
+            return Fail($"Node {fromNodeID} not found in nodeMap.");
 
         Vector3 srcPos     = nodeMap[fromNodeID].worldPosition;
         var     candidates = nodeMap.Keys
-            .Where(id => id != fromNodeID && nodeMap.ContainsKey(id))
-            .OrderBy(_ => UnityEngine.Random.value)   // random order
+            .Where(id => id != fromNodeID)
+            .OrderBy(_ => UnityEngine.Random.value)
             .ToList();
 
-        // Try distance-filtered candidates first, then relax
-        float[] minDistFallbacks = { minDestinationDistance, minDestinationDistance * 0.5f, 0f };
+        // Try strict distance, then relaxed, then any
+        float[] minDists = { minDestinationDistance, minDestinationDistance * 0.5f, 0f };
 
-        foreach (float minD in minDistFallbacks)
+        foreach (float minD in minDists)
         {
             foreach (int destID in candidates)
             {
@@ -796,22 +1038,18 @@ public class CentralizedNavigationSystem : MonoBehaviour
                 List<Vector3> wps = GetDenseRoute(path);
                 if (wps == null || wps.Count < 2) continue;
 
-                // Cache into pool for future reuse
+                // Cache in pool for future use
                 if (!_routePool.ContainsKey(fromNodeID))
                     _routePool[fromNodeID] = new List<RouteResult>();
-
-                var cached = new RouteResult
+                _routePool[fromNodeID].Add(new RouteResult
                 {
                     success = true, sourceNodeID = fromNodeID,
                     destinationNodeID = destID, waypoints = wps,
-                };
-                _routePool[fromNodeID].Add(cached);
+                });
 
                 var key = (fromNodeID, destID);
                 _routeOccupancy.TryGetValue(key, out int occ);
                 _routeOccupancy[key] = occ + 1;
-
-                Debug.Log($"[NavSystem] Live-computed route {fromNodeID}→{destID} and cached.");
 
                 return new RouteResult
                 {
@@ -822,268 +1060,43 @@ public class CentralizedNavigationSystem : MonoBehaviour
             }
         }
 
-        // Last resort: any reachable neighbor via BFS
-        int fallbackDest = FindAnyReachableNode(fromNodeID);
-        if (fallbackDest != -1)
+        // Last resort
+        int fb = FindAnyReachableNode(fromNodeID);
+        if (fb != -1)
         {
-            List<int> fp = FindPath(fromNodeID, fallbackDest);
+            List<int> fp = FindPath(fromNodeID, fb);
             if (fp != null && fp.Count >= 2)
             {
                 List<Vector3> fw = GetDenseRoute(fp);
                 if (fw != null && fw.Count >= 2)
                 {
-                    var key = (fromNodeID, fallbackDest);
+                    var key = (fromNodeID, fb);
                     _routeOccupancy.TryGetValue(key, out int occ);
                     _routeOccupancy[key] = occ + 1;
                     return new RouteResult
                     {
                         success = true, sourceNodeID = fromNodeID,
-                        destinationNodeID = fallbackDest, waypoints = fw,
+                        destinationNodeID = fb, waypoints = fw,
                     };
                 }
             }
         }
 
-        return Fail($"No route found from node {fromNodeID} by any method.");
+        return Fail($"No route found from node {fromNodeID}. Check graph connectivity.");
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private int FindAnyReachableNode(int fromID)
+    private static RouteResult CloneResult(RouteResult src) => new RouteResult
     {
-        var visited = new HashSet<int> { fromID };
-        var queue   = new Queue<int>();
-        queue.Enqueue(fromID);
-        while (queue.Count > 0)
-        {
-            int cur = queue.Dequeue();
-            foreach (int nb in GetNeighbors(cur))
-            {
-                if (visited.Contains(nb)) continue;
-                visited.Add(nb);
-                if (nb != fromID) return nb;
-                queue.Enqueue(nb);
-            }
-        }
-        return -1;
-    }
+        success           = src.success,
+        sourceNodeID      = src.sourceNodeID,
+        destinationNodeID = src.destinationNodeID,
+        waypoints         = new List<Vector3>(src.waypoints),
+    };
 
     private static RouteResult Fail(string reason)
     {
         Debug.LogWarning($"[NavSystem] Route failed: {reason}");
         return new RouteResult { success = false, failReason = reason };
-    }
-
-    private void Shuffle<T>(List<T> list)
-    {
-        for (int i = 0; i < list.Count; i++)
-        {
-            int r = UnityEngine.Random.Range(i, list.Count);
-            (list[i], list[r]) = (list[r], list[i]);
-        }
-    }
-
-    // =========================================================================
-    //  GET DENSE ROUTE  (node path → stitched Vector3 waypoints from cache)
-    // =========================================================================
-
-    public List<Vector3> GetDenseRoute(List<int> nodePath)
-    {
-        var full = new List<Vector3>();
-        if (nodePath == null || nodePath.Count < 2) return full;
-
-        for (int i = 0; i < nodePath.Count - 1; i++)
-        {
-            int from = nodePath[i];
-            int to   = nodePath[i + 1];
-            var key  = (from, to);
-
-            if (!_segmentCache.TryGetValue(key, out Vector3[] seg))
-            {
-                BakeAndCacheSegment(from, to);
-                seg = _segmentCache[key];
-                Debug.LogWarning($"[NavSystem] Lazy-baked segment {from}→{to} at runtime.");
-            }
-
-            int startIdx = (full.Count > 0 && seg.Length > 0) ? 1 : 0;
-            for (int j = startIdx; j < seg.Length; j++)
-                full.Add(seg[j]);
-        }
-
-        return full;
-    }
-
-    // =========================================================================
-    //  GRAPH MANAGEMENT
-    // =========================================================================
-
-    [ContextMenu("Validate And Rebuild Graph")]
-    public void ValidateAndRebuildGraph()
-    {
-        nodes.RemoveAll(n => n == null);
-
-        nextNodeID = 0;
-        foreach (var node in nodes)
-            if (node.nodeID >= nextNodeID) nextNodeID = node.nodeID + 1;
-
-        nodeMap.Clear();
-        var usedIDs = new HashSet<int>();
-
-        foreach (var node in nodes)
-        {
-            if (node == null) continue;
-            if (usedIDs.Contains(node.nodeID)) node.nodeID = nextNodeID++;
-            usedIDs.Add(node.nodeID);
-            node.parentNavSystem = this;
-            nodeMap[node.nodeID] = node;
-        }
-
-        ValidateConnections();
-    }
-
-    private void ValidateConnections()
-    {
-        connectionDefinitions = connectionDefinitions
-            .Where(c => nodeMap.ContainsKey(c.fromNodeID) && nodeMap.ContainsKey(c.toNodeID))
-            .ToList();
-    }
-
-    public void RefreshGraph()
-    {
-        ValidateAndRebuildGraph();
-    }
-
-    public void RegisterNode(NavNode node)
-    {
-        if (node == null) return;
-
-        if (nodes.Contains(node))
-        {
-            if (!nodeMap.ContainsKey(node.nodeID)) nodeMap[node.nodeID] = node;
-            node.parentNavSystem = this;
-            return;
-        }
-
-        if (node.nodeID < 0 || nodeMap.ContainsKey(node.nodeID))
-            node.nodeID = nextNodeID++;
-        else if (node.nodeID >= nextNodeID)
-            nextNodeID = node.nodeID + 1;
-
-        node.parentNavSystem = this;
-        nodes.Add(node);
-        nodeMap[node.nodeID] = node;
-
-#if UNITY_EDITOR
-        UpdateEditorConnectionsVisualization();
-#endif
-    }
-
-    public void AddConnectionDefinition(int fromID, int toID, bool bidirectional)
-    {
-        if (!nodeMap.ContainsKey(fromID) || !nodeMap.ContainsKey(toID)) return;
-        AddConnection(fromID, toID, bidirectional);
-        ValidateConnections();
-#if UNITY_EDITOR
-        UpdateEditorConnectionsVisualization();
-#endif
-    }
-
-    public void AddConnection(int fromID, int toID, bool bidirectional)
-    {
-        if (!nodeMap.ContainsKey(fromID) || !nodeMap.ContainsKey(toID)) return;
-
-        bool exists = connectionDefinitions.Any(c =>
-            (c.fromNodeID == fromID && c.toNodeID == toID) ||
-            (bidirectional && c.fromNodeID == toID && c.toNodeID == fromID));
-
-        if (!exists)
-            connectionDefinitions.Add(new ConnectionDefinition(fromID, toID, bidirectional));
-    }
-
-    public void RemoveConnection(int fromID, int toID)
-    {
-        connectionDefinitions.RemoveAll(c =>
-            (c.fromNodeID == fromID && c.toNodeID == toID) ||
-            (c.fromNodeID == toID   && c.toNodeID == fromID));
-    }
-
-    // =========================================================================
-    //  NODE CREATION
-    // =========================================================================
-
-    public NavNode CreateNode(Vector3 position, int id = -1, Quaternion? rotation = null)
-    {
-        if (nodesParent == null)
-        {
-            nodesParent = new GameObject("NavigationNodes");
-            nodesParent.transform.SetParent(transform);
-        }
-
-        int finalID = (id == -1 || nodeMap.ContainsKey(id)) ? nextNodeID++ : id;
-        if (id >= nextNodeID) nextNodeID = id + 1;
-
-        GameObject nodeObj = new GameObject($"NavNode_{finalID}");
-        nodeObj.transform.SetParent(nodesParent.transform);
-        nodeObj.transform.position = position;
-        nodeObj.transform.rotation = rotation ?? Quaternion.identity;
-
-        NavNode node = nodeObj.AddComponent<NavNode>();
-        node.parentNavSystem = this;
-        node.nodeID          = finalID;
-        nodes.Add(node);
-        nodeMap[finalID] = node;
-
-#if UNITY_EDITOR
-        if (autoSnapNewNodes && !Application.isPlaying)
-            SnapNodeToGround(node);
-#endif
-        return node;
-    }
-
-    // =========================================================================
-    //  NODE QUERIES
-    // =========================================================================
-
-    public int GetClosestNode(Vector3 worldPosition)
-    {
-        float best = float.MaxValue;
-        int   id   = -1;
-        foreach (var kvp in nodeMap)
-        {
-            if (kvp.Value == null) continue;
-            float d = Vector3.Distance(worldPosition, kvp.Value.worldPosition);
-            if (d < best) { best = d; id = kvp.Key; }
-        }
-        return id;
-    }
-
-    public int GetRandomNode()
-    {
-        if (nodeMap.Count == 0) return -1;
-        var keys = nodeMap.Keys.ToList();
-        return keys[UnityEngine.Random.Range(0, keys.Count)];
-    }
-
-    public int GetRandomNode(HashSet<int> exclude)
-    {
-        if (nodeMap.Count == 0) return -1;
-        var available = nodeMap.Keys.Where(k => !exclude.Contains(k)).ToList();
-        return available.Count > 0
-            ? available[UnityEngine.Random.Range(0, available.Count)]
-            : GetRandomNode();
-    }
-
-    public int GetDistantNode(int fromNodeID, float minDistance = 25f)
-    {
-        if (!nodeMap.ContainsKey(fromNodeID)) return -1;
-        var candidates = nodeMap.Keys
-            .Where(id => id != fromNodeID && nodeMap.ContainsKey(id))
-            .Where(id => Vector3.Distance(nodeMap[fromNodeID].worldPosition,
-                                          nodeMap[id].worldPosition) >= minDistance)
-            .ToList();
-        return candidates.Count > 0
-            ? candidates[UnityEngine.Random.Range(0, candidates.Count)]
-            : fromNodeID;
     }
 
     // =========================================================================
@@ -1094,15 +1107,14 @@ public class CentralizedNavigationSystem : MonoBehaviour
     {
         if (!nodeMap.ContainsKey(start) || !nodeMap.ContainsKey(target))
         {
-            Debug.LogWarning($"[NavSystem] FindPath: node {start} or {target} not in map.");
-            return new List<int>();
+            Debug.LogWarning($"[NavSystem] FindPath: node {start} or {target} not in nodeMap.");
+            return null;
         }
-
         if (start == target) return new List<int> { start };
 
         var cameFrom = new Dictionary<int, int>();
-        var gScore   = new Dictionary<int, float> { { start, 0f } };
-        var fScore   = new Dictionary<int, float> { { start, Heuristic(start, target) } };
+        var gScore   = new Dictionary<int, float> { [start] = 0f };
+        var fScore   = new Dictionary<int, float> { [start] = Heuristic(start, target) };
         var openSet  = new PriorityQueue<int>();
         var closed   = new HashSet<int>();
 
@@ -1128,15 +1140,26 @@ public class CentralizedNavigationSystem : MonoBehaviour
             }
         }
 
-        Debug.LogWarning($"[NavSystem] No path found: {start} → {target}");
-        return new List<int>();
+        return null;
+    }
+
+    public List<int> GetNeighbors(int nodeID)
+    {
+        var result = new List<int>();
+        foreach (var conn in connectionDefinitions)
+        {
+            if (conn.fromNodeID == nodeID && nodeMap.ContainsKey(conn.toNodeID))
+                result.Add(conn.toNodeID);
+            else if (conn.bidirectional && conn.toNodeID == nodeID && nodeMap.ContainsKey(conn.fromNodeID))
+                result.Add(conn.fromNodeID);
+        }
+        return result.Distinct().ToList();
     }
 
     private float Heuristic(int a, int b)
     {
         if (!nodeMap.ContainsKey(a) || !nodeMap.ContainsKey(b)) return 999999f;
-        Vector3 pa = nodeMap[a].worldPosition;
-        Vector3 pb = nodeMap[b].worldPosition;
+        Vector3 pa = nodeMap[a].worldPosition, pb = nodeMap[b].worldPosition;
         return Vector3.Distance(new Vector3(pa.x, 0, pa.z), new Vector3(pb.x, 0, pb.z));
     }
 
@@ -1144,19 +1167,6 @@ public class CentralizedNavigationSystem : MonoBehaviour
     {
         if (!nodeMap.ContainsKey(a) || !nodeMap.ContainsKey(b)) return 1f;
         return Vector3.Distance(nodeMap[a].worldPosition, nodeMap[b].worldPosition);
-    }
-
-    public List<int> GetNeighbors(int nodeID)
-    {
-        var result = new List<int>();
-        foreach (var c in connectionDefinitions)
-        {
-            if (c.fromNodeID == nodeID && nodeMap.ContainsKey(c.toNodeID))
-                result.Add(c.toNodeID);
-            else if (c.bidirectional && c.toNodeID == nodeID && nodeMap.ContainsKey(c.fromNodeID))
-                result.Add(c.fromNodeID);
-        }
-        return result.Distinct().ToList();
     }
 
     private List<int> ReconstructPath(Dictionary<int, int> cameFrom, int current)
@@ -1171,6 +1181,68 @@ public class CentralizedNavigationSystem : MonoBehaviour
     }
 
     // =========================================================================
+    //  NODE QUERIES
+    // =========================================================================
+
+    public int GetClosestNode(Vector3 worldPosition)
+    {
+        float best = float.MaxValue; int id = -1;
+        foreach (var kvp in nodeMap)
+        {
+            if (kvp.Value == null) continue;
+            float d = Vector3.Distance(worldPosition, kvp.Value.worldPosition);
+            if (d < best) { best = d; id = kvp.Key; }
+        }
+        return id;
+    }
+
+    public int GetRandomNode()
+    {
+        if (nodeMap.Count == 0) return -1;
+        var keys = nodeMap.Keys.ToList();
+        return keys[UnityEngine.Random.Range(0, keys.Count)];
+    }
+
+    public int GetRandomNode(HashSet<int> exclude)
+    {
+        var available = nodeMap.Keys.Where(k => !exclude.Contains(k)).ToList();
+        return available.Count > 0
+            ? available[UnityEngine.Random.Range(0, available.Count)]
+            : GetRandomNode();
+    }
+
+    public int GetDistantNode(int fromNodeID, float minDistance = 25f)
+    {
+        if (!nodeMap.ContainsKey(fromNodeID)) return -1;
+        var candidates = nodeMap.Keys
+            .Where(id => id != fromNodeID && nodeMap.ContainsKey(id))
+            .Where(id => Vector3.Distance(nodeMap[fromNodeID].worldPosition,
+                                          nodeMap[id].worldPosition) >= minDistance)
+            .ToList();
+        return candidates.Count > 0
+            ? candidates[UnityEngine.Random.Range(0, candidates.Count)]
+            : fromNodeID;
+    }
+
+    private int FindAnyReachableNode(int fromID)
+    {
+        var visited = new HashSet<int> { fromID };
+        var queue   = new Queue<int>(new[] { fromID });
+        while (queue.Count > 0)
+        {
+            int cur = queue.Dequeue();
+            foreach (int nb in GetNeighbors(cur))
+            {
+                if (visited.Contains(nb)) continue;
+                visited.Add(nb);
+                if (nb != fromID) return nb;
+                queue.Enqueue(nb);
+            }
+        }
+        return -1;
+    }
+
+    // =========================================================================
     //  VEHICLE SPAWNING
     // =========================================================================
 
@@ -1180,32 +1252,30 @@ public class CentralizedNavigationSystem : MonoBehaviour
 
         if (nodes.Count < 2)
         {
-            Debug.LogError("[Traffic] Need at least 2 nodes!");
+            Debug.LogError("[Traffic] Need at least 2 nodes to spawn traffic!");
             return;
         }
 
+        // Build prefab list
         var prefabs = new List<GameObject>();
         if (npcVehiclePrefab != null) prefabs.Add(npcVehiclePrefab);
         prefabs.AddRange(npcVariants.Where(v => v != null));
 
-        if (prefabs.Count == 0) { Debug.LogError("[Traffic] No vehicle prefabs!"); return; }
-
-        // Build shared configs once — same for every vehicle spawned this session
-        VehicleGroundConfig  groundCfg = BuildGroundConfig();
-        VehicleSharedConfig  sharedCfg = BuildSharedConfig();
-
-        // Shuffle available node IDs for varied spawn positions
-        var nodeIDs = nodeMap.Keys.ToList();
-        for (int i = 0; i < nodeIDs.Count; i++)
+        if (prefabs.Count == 0)
         {
-            int r = UnityEngine.Random.Range(i, nodeIDs.Count);
-            (nodeIDs[i], nodeIDs[r]) = (nodeIDs[r], nodeIDs[i]);
+            Debug.LogError("[Traffic] No NPC vehicle prefabs assigned!");
+            return;
         }
 
-        var usedPositions = new List<Vector3>();
-        int spawned = 0;
+        VehicleGroundConfig groundCfg = BuildGroundConfig();
+        VehicleSharedConfig sharedCfg = BuildSharedConfig();
 
-        Debug.Log("[Traffic] ══════════ SPAWNING TRAFFIC ══════════");
+        // Shuffle node order to vary spawn positions
+        var nodeIDs = nodeMap.Keys.ToList();
+        Shuffle(nodeIDs);
+
+        var usedPositions = new List<Vector3>();
+        int spawned       = 0;
 
         foreach (int nodeID in nodeIDs)
         {
@@ -1214,56 +1284,64 @@ public class CentralizedNavigationSystem : MonoBehaviour
 
             Vector3 nodePos = nodeMap[nodeID].transform.position;
 
-            bool tooClose = usedPositions.Any(p => Vector3.Distance(nodePos, p) < vehicleSpacing);
-            if (tooClose) continue;
+            // Enforce minimum gap between spawned vehicles
+            if (usedPositions.Any(p => Vector3.Distance(nodePos, p) < vehicleSpacing)) continue;
 
-            GameObject prefab    = prefabs[UnityEngine.Random.Range(0, prefabs.Count)];
-            Quaternion spawnRot  = nodeMap[nodeID].transform.rotation;
+            GameObject prefab   = prefabs[UnityEngine.Random.Range(0, prefabs.Count)];
+            Quaternion spawnRot = nodeMap[nodeID].transform.rotation;
 
-            // Instantiate off-screen to read live collider bounds
+            // Spawn below world temporarily for bound measurement
             var vehicleObj = Instantiate(prefab, new Vector3(nodePos.x, -5000f, nodePos.z), spawnRot);
-            vehicleObj.name = $"Traffic_{spawned:D3}";
+            vehicleObj.name = $"NPC_Vehicle_{spawned:D3}";
 
-            float bottomOffset  = GetLiveBottomOffset(vehicleObj);
-            Vector3 spawnPos    = new Vector3(nodePos.x,
-                                              nodePos.y + bottomOffset + spawnHeightOffset,
-                                              nodePos.z);
+            // Ground the vehicle properly
+            float    bottomOffset = GetColliderBottomOffset(vehicleObj);
+            Vector3  spawnPos     = new Vector3(nodePos.x, nodePos.y + bottomOffset + spawnHeightOffset, nodePos.z);
 
-            // Configure Rigidbody
-            Rigidbody rb = vehicleObj.GetComponent<Rigidbody>() ?? vehicleObj.AddComponent<Rigidbody>();
-            rb.mass           = 1200f;
-            rb.linearDamping  = 1f;
-            rb.angularDamping = 10f;
-            rb.interpolation  = RigidbodyInterpolation.Interpolate;
-            rb.constraints    = RigidbodyConstraints.None;
-            rb.isKinematic    = true;
+            // Configure Rigidbody — kinematic during setup, released next FixedUpdate
+            Rigidbody rb = vehicleObj.GetComponent<Rigidbody>()
+                        ?? vehicleObj.AddComponent<Rigidbody>();
+            rb.mass             = 1200f;
+            rb.linearDamping    = 1f;
+            rb.angularDamping   = 10f;
+            rb.interpolation    = RigidbodyInterpolation.Interpolate;
+            rb.constraints      = RigidbodyConstraints.None;
+            rb.isKinematic      = true;
 
             vehicleObj.transform.position = spawnPos;
             rb.position = spawnPos;
             rb.rotation = spawnRot;
 
+            /*// Neutralise child Rigidbodies (truck cab, articulated joints, etc.)
+            foreach (Rigidbody childRb in vehicleObj.GetComponentsInChildren<Rigidbody>())
+            {
+                if (childRb == rb) continue;
+                childRb.useGravity     = false;
+                childRb.linearDamping  = 20f;
+                childRb.angularDamping = 20f;
+                childRb.constraints    = RigidbodyConstraints.FreezeAll;
+            }
+            foreach (Joint joint in vehicleObj.GetComponentsInChildren<Joint>())
+                joint.enabled = false;*/
+
+            // Initialise TrafficVehicle — this is the ONLY component that moves NPCs
             TrafficVehicle tv = vehicleObj.GetComponent<TrafficVehicle>()
                              ?? vehicleObj.AddComponent<TrafficVehicle>();
-
             tv.Initialize(this, nodeID, groundCfg, sharedCfg);
 
-            StartCoroutine(ReleaseKinematicNextFrame(rb));
+            StartCoroutine(ReleaseKinematicAfterSetup(rb));
 
             activeVehicles.Add(tv);
             usedPositions.Add(spawnPos);
             spawned++;
-
-            Debug.Log($"[Traffic] Spawned {vehicleObj.name} at Node {nodeID} | " +
-                      $"Y={spawnPos.y:F2} (bottomOffset={bottomOffset:F2})");
         }
 
-        Debug.Log($"[Traffic] ══════════ {spawned} VEHICLES SPAWNED ══════════");
+        Debug.Log($"[Traffic] ══ {spawned}/{totalTrafficVehicles} NPC vehicles spawned ══");
     }
 
-    private float GetLiveBottomOffset(GameObject obj)
+    private float GetColliderBottomOffset(GameObject obj)
     {
-        float lowest = 0f;
-        bool  found  = false;
+        float lowest = 0f; bool found = false;
         foreach (Collider col in obj.GetComponentsInChildren<Collider>(true))
         {
             if (col.isTrigger) continue;
@@ -1273,7 +1351,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
         return found ? Mathf.Abs(lowest) : 0f;
     }
 
-    private IEnumerator ReleaseKinematicNextFrame(Rigidbody rb)
+    private IEnumerator ReleaseKinematicAfterSetup(Rigidbody rb)
     {
         yield return new WaitForFixedUpdate();
         yield return new WaitForFixedUpdate();
@@ -1301,15 +1379,15 @@ public class CentralizedNavigationSystem : MonoBehaviour
                 case GroundSurfaceType.Road:
                     int rl = LayerMask.NameToLayer("Road");
                     resolved = rl >= 0 ? (1 << rl) : LayerMask.GetMask("Default");
-                    if (rl < 0) Debug.LogWarning("[NavSystem] No 'Road' layer found, falling back to Default.");
+                    if (rl < 0) Debug.LogWarning("[NavSystem] No 'Road' layer found — using Default.");
                     break;
                 case GroundSurfaceType.Terrain:
                     resolved = LayerMask.GetMask("Terrain");
                     break;
                 case GroundSurfaceType.RoadAndTerrain:
-                    int roadL   = LayerMask.NameToLayer("Road");
-                    LayerMask t = LayerMask.GetMask("Terrain");
-                    resolved    = roadL >= 0 ? ((1 << roadL) | t) : t;
+                    int roadLayer = LayerMask.NameToLayer("Road");
+                    LayerMask terrain = LayerMask.GetMask("Terrain");
+                    resolved = roadLayer >= 0 ? ((1 << roadLayer) | terrain) : terrain;
                     break;
                 case GroundSurfaceType.Custom:
                     resolved = groundLayerOverride;
@@ -1332,44 +1410,36 @@ public class CentralizedNavigationSystem : MonoBehaviour
         };
     }
 
-    private VehicleSharedConfig BuildSharedConfig()
+    private VehicleSharedConfig BuildSharedConfig() => new VehicleSharedConfig
     {
-        return new VehicleSharedConfig
-        {
-            speed                      = vehicleSpeed,
-            turnSpeed                  = vehicleTurnSpeed,
-            speedSmoothTime            = vehicleSpeedSmoothTime,
-
-            minPathLength              = minPathLength,
-            maxPathLength              = maxPathLength,
-            minDestinationDistance     = minDestinationDistance,
-            maxDestinationDistance     = maxDestinationDistance,
-            maxPathAttempts            = maxPathAttempts,
-
-            waypointReachDistanceXZ    = waypointReachDistanceXZ,
-            waypointReachDistanceY     = waypointReachDistanceY,
-            minAdvanceInterval         = minAdvanceInterval,
-
-            detectionLayerMask         = detectionLayerMask,
-            npcVehicleLayer            = npcVehicleLayer,
-            playerVehicleLayer         = playerVehicleLayer,
-            trafficLightLayer          = trafficLightLayer,
-            detectionRange             = detectionRange,
-            vehicleStoppingDistance    = vehicleStoppingDistance,
-            obstacleStoppingDistance   = obstacleStoppingDistance,
-            trafficLightStopDistance   = trafficLightStopDistance,
-            maxRedLightWaitTime        = maxRedLightWaitTime,
-
-            maxStuckFrames              = maxStuckFrames,
-            stuckMovementThreshold      = stuckMovementThreshold,
-            maxPathRecalculations       = maxPathRecalculations,
-
-            showDebugGizmos             = showDebugGizmos,
-        };
-    }
+        speed                  = vehicleSpeed,
+        turnSpeed              = vehicleTurnSpeed,
+        speedSmoothTime        = vehicleSpeedSmoothTime,
+        minPathLength          = minPathLength,
+        maxPathLength          = maxPathLength,
+        minDestinationDistance = minDestinationDistance,
+        maxDestinationDistance = maxDestinationDistance,
+        maxPathAttempts        = maxPathAttempts,
+        waypointReachDistanceXZ = waypointReachDistanceXZ,
+        waypointReachDistanceY  = waypointReachDistanceY,
+        minAdvanceInterval     = minAdvanceInterval,
+        detectionLayerMask     = detectionLayerMask,
+        npcVehicleLayer        = npcVehicleLayer,
+        playerVehicleLayer     = playerVehicleLayer,
+        trafficLightLayer      = trafficLightLayer,
+        detectionRange         = detectionRange,
+        vehicleStoppingDistance  = vehicleStoppingDistance,
+        obstacleStoppingDistance = obstacleStoppingDistance,
+        trafficLightStopDistance = trafficLightStopDistance,
+        maxRedLightWaitTime    = maxRedLightWaitTime,
+        maxStuckFrames         = maxStuckFrames,
+        stuckMovementThreshold = stuckMovementThreshold,
+        maxPathRecalculations  = maxPathRecalculations,
+        showDebugGizmos        = showDebugGizmos,
+    };
 
     // =========================================================================
-    //  TRAFFIC MANAGEMENT
+    //  TRAFFIC MANAGEMENT (public API)
     // =========================================================================
 
     [ContextMenu("Spawn Traffic Now")]
@@ -1381,15 +1451,33 @@ public class CentralizedNavigationSystem : MonoBehaviour
         foreach (var v in activeVehicles)
             if (v != null) Destroy(v.gameObject);
         activeVehicles.Clear();
-        Debug.Log("[Traffic] All traffic cleared.");
     }
 
     [ContextMenu("Respawn Traffic")]
     public void RespawnTraffic() { ClearAllTraffic(); SpawnTrafficVehicles(); }
 
     // =========================================================================
-    //  PATH VISUALIZATION
+    //  PATH VISUALIZATION  (used by CentralizedCarController for player car)
     // =========================================================================
+
+    private void SetupLineRenderer()
+    {
+        if (pathLineRenderer != null) return;
+        var obj = new GameObject("PathVisualizer");
+        obj.transform.SetParent(transform);
+        pathLineRenderer = obj.AddComponent<LineRenderer>();
+        pathLineRenderer.material   = new Material(Shader.Find("Sprites/Default"));
+        pathLineRenderer.startWidth = 0.2f;
+        pathLineRenderer.endWidth   = 0.2f;
+        var grad = new Gradient();
+        grad.colorKeys = new[]
+        {
+            new GradientColorKey(Color.yellow, 0f),
+            new GradientColorKey(Color.red,    1f),
+        };
+        pathLineRenderer.colorGradient = grad;
+        pathLineRenderer.enabled = false;
+    }
 
     public void ClearPathVisualization()
     {
@@ -1402,25 +1490,93 @@ public class CentralizedNavigationSystem : MonoBehaviour
         _playerCachedDenseRoute = null;
     }
 
-    private void SetupLineRenderer()
+    /// <summary>
+    /// Updates the line renderer to show the player's remaining route,
+    /// trimmed from the car's current projected position on the path.
+    /// Called by CentralizedCarController every frame — no Rigidbody interaction.
+    /// </summary>
+    public void VisualizePlayerPath(List<int> nodePath, Vector3 playerWorldPos)
     {
-        if (pathLineRenderer != null) return;
+        if (nodePath == null || nodePath.Count == 0) { ClearPathVisualization(); return; }
+        SetupLineRenderer();
 
-        var lrObj = new GameObject("PathVisualizer");
-        lrObj.transform.SetParent(transform);
-        pathLineRenderer = lrObj.AddComponent<LineRenderer>();
-        pathLineRenderer.material   = new Material(Shader.Find("Sprites/Default"));
-        pathLineRenderer.startWidth = 0.2f;
-        pathLineRenderer.endWidth   = 0.2f;
-
-        var grad = new Gradient();
-        grad.colorKeys = new[]
+        // Rebuild dense route only when the node path changes
+        bool pathChanged = _playerCachedNodePath == null
+                        || _playerCachedNodePath.Count != nodePath.Count;
+        if (!pathChanged)
         {
-            new GradientColorKey(Color.yellow, 0f),
-            new GradientColorKey(Color.red,    1f)
-        };
-        pathLineRenderer.colorGradient = grad;
-        pathLineRenderer.enabled       = false;
+            for (int i = 0; i < nodePath.Count; i++)
+                if (_playerCachedNodePath[i] != nodePath[i]) { pathChanged = true; break; }
+        }
+
+        if (pathChanged)
+        {
+            _playerCachedDenseRoute = RouteCacheReady
+                ? GetDenseRoute(nodePath)
+                : BuildNodePositionList(nodePath);
+
+            if (_playerCachedDenseRoute == null || _playerCachedDenseRoute.Count < 2)
+                _playerCachedDenseRoute = BuildNodePositionList(nodePath);
+
+            _playerCachedNodePath = new List<int>(nodePath);
+        }
+
+        if (_playerCachedDenseRoute == null || _playerCachedDenseRoute.Count < 2)
+        { ClearPathVisualization(); return; }
+
+        // Find closest segment to player (XZ only — ignore height difference on hills)
+        int   closestSeg  = 0;
+        float closestDistSq = float.MaxValue;
+        float closestT    = 0f;
+
+        for (int i = 0; i < _playerCachedDenseRoute.Count - 1; i++)
+        {
+            Vector3 a = _playerCachedDenseRoute[i];
+            Vector3 b = _playerCachedDenseRoute[i + 1];
+            Vector3 ab = b - a;
+            float len  = ab.sqrMagnitude;
+            float t    = len > 0.0001f
+                ? Mathf.Clamp01(Vector3.Dot(playerWorldPos - a, ab) / len)
+                : 0f;
+            Vector3 proj = a + ab * t;
+            float dxz    = new Vector2(playerWorldPos.x - proj.x,
+                                       playerWorldPos.z - proj.z).sqrMagnitude;
+            if (dxz < closestDistSq) { closestDistSq = dxz; closestSeg = i; closestT = t; }
+        }
+
+        // Advance past segment if very close to end
+        int   startSeg = closestSeg;
+        float startT   = closestT;
+        if (startT >= 0.9999f && startSeg + 1 < _playerCachedDenseRoute.Count - 1)
+        { startSeg++; startT = 0f; }
+
+        // Build trimmed waypoint list starting from projected position
+        var trimmed = new List<Vector3>();
+        Vector3 segA  = _playerCachedDenseRoute[startSeg];
+        Vector3 segB  = (startSeg + 1 < _playerCachedDenseRoute.Count)
+                      ? _playerCachedDenseRoute[startSeg + 1] : segA;
+        Vector3 proj0 = Vector3.Lerp(segA, segB, startT);
+        proj0.y += pathLineHeightOffset;
+        trimmed.Add(proj0);
+
+        for (int i = startSeg + 1; i < _playerCachedDenseRoute.Count; i++)
+        {
+            Vector3 p = _playerCachedDenseRoute[i];
+            p.y += pathLineHeightOffset;
+            trimmed.Add(p);
+        }
+
+        if (trimmed.Count < 2) { ClearPathVisualization(); return; }
+
+        pathLineRenderer.positionCount = trimmed.Count;
+        pathLineRenderer.SetPositions(trimmed.ToArray());
+        pathLineRenderer.enabled = true;
+    }
+
+    public void InvalidatePlayerPathCache()
+    {
+        _playerCachedNodePath   = null;
+        _playerCachedDenseRoute = null;
     }
 
     public void VisualizePath(List<int> path)
@@ -1438,170 +1594,133 @@ public class CentralizedNavigationSystem : MonoBehaviour
         pathLineRenderer.enabled = true;
     }
 
-    // =========================================================================
-    //  PLAYER PATH VISUALIZATION — HYBRID NAVMESH DENSE LINE
-    //
-    //  Uses the same pre-baked dense NavMesh waypoints as NPCs so the line
-    //  follows the road surface exactly.  The line is trimmed from the player's
-    //  projected position forward so it never "snaps back" when the car is
-    //  between two far-apart nodes.
-    // =========================================================================
-
-    // Cached dense waypoints for the player's current route (node-path key).
-    private List<int>    _playerCachedNodePath   = null;
-    private List<Vector3> _playerCachedDenseRoute = null;
-
-    /// <summary>
-    /// Call once when a new route is computed, and again every frame (or every
-    /// N seconds) to trim the line as the player advances.
-    /// </summary>
-    /// <param name="nodePath">The A* node-ID path (same list FindPath returns).</param>
-    /// <param name="playerWorldPos">Current world position of the player car.</param>
-    public void VisualizePlayerPath(List<int> nodePath, Vector3 playerWorldPos)
-    {
-        if (nodePath == null || nodePath.Count == 0)
-        {
-            ClearPathVisualization();
-            return;
-        }
-
-        SetupLineRenderer();
-
-        // ── Rebuild dense waypoint list only when the node path changes ──────
-        bool pathChanged = (_playerCachedNodePath == null)
-                        || (_playerCachedNodePath.Count != nodePath.Count);
-
-        if (!pathChanged)
-        {
-            for (int i = 0; i < nodePath.Count; i++)
-            {
-                if (_playerCachedNodePath[i] != nodePath[i]) { pathChanged = true; break; }
-            }
-        }
-
-        if (pathChanged)
-        {
-            // Use pre-baked NavMesh dense route if available, else fall back
-            // to the normal node-position list lifted by pathLineHeightOffset.
-            if (useNavMeshHybrid && RouteCacheReady)
-            {
-                _playerCachedDenseRoute = GetDenseRoute(nodePath);
-                if (_playerCachedDenseRoute == null || _playerCachedDenseRoute.Count < 2)
-                    _playerCachedDenseRoute = BuildNodePositionList(nodePath);
-            }
-            else
-            {
-                _playerCachedDenseRoute = BuildNodePositionList(nodePath);
-            }
-
-            _playerCachedNodePath = new List<int>(nodePath);
-        }
-
-        if (_playerCachedDenseRoute == null || _playerCachedDenseRoute.Count == 0)
-        {
-            ClearPathVisualization();
-            return;
-        }
-
-        // ── Find player's projected position on the polyline ─────────────────
-        // Walk every dense segment, project the player onto it (XZ only so
-        // slopes don't skew the result), keep the closest hit.
-        // "closestSeg" is the index of segment [closestSeg → closestSeg+1].
-        // "closestT"   is how far along that segment the projection lands [0..1].
-
-        int   closestSeg    = 0;
-        float closestDistSq = float.MaxValue;
-        float closestT      = 0f;
-
-        for (int i = 0; i < _playerCachedDenseRoute.Count - 1; i++)
-        {
-            Vector3 a  = _playerCachedDenseRoute[i];
-            Vector3 b  = _playerCachedDenseRoute[i + 1];
-            Vector3 ab = b - a;
-            float   len = ab.sqrMagnitude;
-
-            float t = (len > 0.0001f)
-                    ? Mathf.Clamp01(Vector3.Dot(playerWorldPos - a, ab) / len)
-                    : 0f;
-
-            // Compare XZ only — ignore height differences on slopes
-            Vector3 proj   = a + ab * t;
-            float   dxz    = (new Vector2(playerWorldPos.x - proj.x,
-                                          playerWorldPos.z - proj.z)).sqrMagnitude;
-
-            if (dxz < closestDistSq)
-            {
-                closestDistSq = dxz;
-                closestSeg    = i;
-                closestT      = t;
-            }
-        }
-
-        // ── Build trimmed point list ──────────────────────────────────────────
-        // Start from the exact projected position on the road so the line
-        // origin is always glued to the car — no snapping back to node centres.
-        //
-        // When closestT == 1.0 the projected point equals _playerCachedDenseRoute[closestSeg+1],
-        // so we advance the segment index to avoid a duplicate first point.
-
-        int   startSeg = closestSeg;
-        float startT   = closestT;
-
-        if (startT >= 0.9999f && startSeg + 1 < _playerCachedDenseRoute.Count - 1)
-        {
-            // Snap to the start of the next segment
-            startSeg++;
-            startT = 0f;
-        }
-
-        var trimmed = new List<Vector3>();
-
-        // Projected start (car's position snapped to road polyline)
-        Vector3 sA = _playerCachedDenseRoute[startSeg];
-        Vector3 sB = (startSeg + 1 < _playerCachedDenseRoute.Count)
-                   ? _playerCachedDenseRoute[startSeg + 1]
-                   : sA;
-        Vector3 projStart = Vector3.Lerp(sA, sB, startT);
-        projStart.y += pathLineHeightOffset;
-        trimmed.Add(projStart);
-
-        // All remaining waypoints after the projected segment
-        for (int i = startSeg + 1; i < _playerCachedDenseRoute.Count; i++)
-        {
-            Vector3 p = _playerCachedDenseRoute[i];
-            p.y += pathLineHeightOffset;
-            trimmed.Add(p);
-        }
-
-        // Line needs at least 2 points; if we're at/past the last waypoint hide it
-        if (trimmed.Count < 2)
-        {
-            ClearPathVisualization();
-            return;
-        }
-
-        pathLineRenderer.positionCount = trimmed.Count;
-        pathLineRenderer.SetPositions(trimmed.ToArray());
-        pathLineRenderer.enabled = true;
-    }
-
-    /// <summary>Clears the cached player route (call when a brand-new path is assigned).</summary>
-    public void InvalidatePlayerPathCache()
-    {
-        _playerCachedNodePath   = null;
-        _playerCachedDenseRoute = null;
-    }
-
-    // Fallback: simple node-position list when NavMesh hybrid is not ready.
     private List<Vector3> BuildNodePositionList(List<int> nodePath)
     {
         var pts = new List<Vector3>();
         foreach (int id in nodePath)
-        {
-            if (nodeMap.ContainsKey(id))
-                pts.Add(nodeMap[id].worldPosition);
-        }
+            if (nodeMap.ContainsKey(id)) pts.Add(nodeMap[id].worldPosition);
         return pts;
+    }
+
+    // =========================================================================
+    //  GRAPH MANAGEMENT
+    // =========================================================================
+
+    [ContextMenu("Validate And Rebuild Graph")]
+    public void ValidateAndRebuildGraph()
+    {
+        nodes.RemoveAll(n => n == null);
+        nextNodeID = 0;
+        foreach (var node in nodes)
+            if (node != null && node.nodeID >= nextNodeID) nextNodeID = node.nodeID + 1;
+
+        nodeMap.Clear();
+        var usedIDs = new HashSet<int>();
+        foreach (var node in nodes)
+        {
+            if (node == null) continue;
+            if (usedIDs.Contains(node.nodeID)) node.nodeID = nextNodeID++;
+            usedIDs.Add(node.nodeID);
+            node.parentNavSystem = this;
+            nodeMap[node.nodeID] = node;
+        }
+        ValidateConnections();
+    }
+
+    private void ValidateConnections()
+    {
+        connectionDefinitions = connectionDefinitions
+            .Where(c => c != null
+                     && nodeMap.ContainsKey(c.fromNodeID)
+                     && nodeMap.ContainsKey(c.toNodeID))
+            .ToList();
+    }
+
+    public void RefreshGraph() => ValidateAndRebuildGraph();
+
+    public void RegisterNode(NavNode node)
+    {
+        if (node == null) return;
+        if (nodes.Contains(node))
+        {
+            if (!nodeMap.ContainsKey(node.nodeID)) nodeMap[node.nodeID] = node;
+            node.parentNavSystem = this;
+            return;
+        }
+        if (node.nodeID < 0 || nodeMap.ContainsKey(node.nodeID)) node.nodeID = nextNodeID++;
+        else if (node.nodeID >= nextNodeID) nextNodeID = node.nodeID + 1;
+        node.parentNavSystem = this;
+        nodes.Add(node);
+        nodeMap[node.nodeID] = node;
+    }
+
+    public void AddConnectionDefinition(int fromID, int toID, bool bidirectional)
+    {
+        if (!nodeMap.ContainsKey(fromID) || !nodeMap.ContainsKey(toID)) return;
+        AddConnection(fromID, toID, bidirectional);
+        ValidateConnections();
+    }
+
+    public void AddConnection(int fromID, int toID, bool bidirectional)
+    {
+        if (!nodeMap.ContainsKey(fromID) || !nodeMap.ContainsKey(toID)) return;
+        bool exists = connectionDefinitions.Any(c =>
+            (c.fromNodeID == fromID && c.toNodeID == toID) ||
+            (bidirectional && c.fromNodeID == toID && c.toNodeID == fromID));
+        if (!exists)
+            connectionDefinitions.Add(new ConnectionDefinition(fromID, toID, bidirectional));
+    }
+
+    public void RemoveConnection(int fromID, int toID)
+    {
+        connectionDefinitions.RemoveAll(c =>
+            (c.fromNodeID == fromID && c.toNodeID == toID) ||
+            (c.fromNodeID == toID   && c.toNodeID == fromID));
+    }
+
+    // =========================================================================
+    //  NODE CREATION
+    // =========================================================================
+
+    public NavNode CreateNode(Vector3 position, int id = -1, Quaternion? rotation = null)
+    {
+        if (nodesParent == null)
+        {
+            nodesParent = new GameObject("NavigationNodes");
+            nodesParent.transform.SetParent(transform);
+        }
+
+        int finalID = (id == -1 || nodeMap.ContainsKey(id)) ? nextNodeID++ : id;
+        if (id >= nextNodeID) nextNodeID = id + 1;
+
+        var nodeObj = new GameObject($"NavNode_{finalID}");
+        nodeObj.transform.SetParent(nodesParent.transform);
+        nodeObj.transform.position = position;
+        nodeObj.transform.rotation = rotation ?? Quaternion.identity;
+
+        NavNode node = nodeObj.AddComponent<NavNode>();
+        node.parentNavSystem = this;
+        node.nodeID          = finalID;
+        nodes.Add(node);
+        nodeMap[finalID] = node;
+
+#if UNITY_EDITOR
+        if (autoSnapNewNodes && !Application.isPlaying) SnapNodeToGround(node);
+#endif
+        return node;
+    }
+
+    // =========================================================================
+    //  UTILITY
+    // =========================================================================
+
+    private void Shuffle<T>(List<T> list)
+    {
+        for (int i = 0; i < list.Count; i++)
+        {
+            int r = UnityEngine.Random.Range(i, list.Count);
+            (list[i], list[r]) = (list[r], list[i]);
+        }
     }
 
     // =========================================================================
@@ -1610,7 +1729,6 @@ public class CentralizedNavigationSystem : MonoBehaviour
 
     private void OnDrawGizmos()
     {
-        // Nodes
         if (nodes != null)
         {
             foreach (var node in nodes)
@@ -1619,48 +1737,43 @@ public class CentralizedNavigationSystem : MonoBehaviour
                 Gizmos.color = new Color(0f, 1f, 1f, 1f);
                 Gizmos.DrawSphere(node.transform.position, 0.6f);
 #if UNITY_EDITOR
-                Handles.Label(node.transform.position + Vector3.up * 1.2f,
-                              $"Node {node.nodeID}",
-                              new GUIStyle
-                              {
-                                  normal    = new GUIStyleState { textColor = Color.white },
-                                  fontSize  = 14,
-                                  fontStyle = FontStyle.Bold,
-                                  alignment = TextAnchor.MiddleCenter
-                              });
+                UnityEditor.Handles.Label(
+                    node.transform.position + Vector3.up * 1.3f,
+                    $"Node {node.nodeID}",
+                    new GUIStyle
+                    {
+                        normal    = new GUIStyleState { textColor = Color.white },
+                        fontSize  = 13,
+                        fontStyle = FontStyle.Bold,
+                        alignment = TextAnchor.MiddleCenter,
+                    });
 #endif
             }
         }
 
-        // Connections
         if (connectionDefinitions != null)
         {
             foreach (var conn in connectionDefinitions)
             {
-                if (!nodeMap.ContainsKey(conn.fromNodeID) ||
-                    !nodeMap.ContainsKey(conn.toNodeID)) continue;
-
+                if (!nodeMap.ContainsKey(conn.fromNodeID) || !nodeMap.ContainsKey(conn.toNodeID)) continue;
                 Vector3 s = nodeMap[conn.fromNodeID].transform.position + Vector3.up * 0.2f;
                 Vector3 e = nodeMap[conn.toNodeID].transform.position   + Vector3.up * 0.2f;
-
                 Gizmos.color = conn.bidirectional
                     ? new Color(0f, 1f, 0f, 0.8f)
                     : new Color(1f, 0.5f, 0f, 0.8f);
-
                 Gizmos.DrawLine(s, e);
 
                 if (!conn.bidirectional)
                 {
                     Vector3 dir  = (e - s).normalized;
-                    Vector3 mid  = s + dir * Vector3.Distance(s, e) * 0.5f;
+                    Vector3 mid  = s + dir * (Vector3.Distance(s, e) * 0.5f);
                     Vector3 perp = Vector3.Cross(Vector3.up, dir) * 0.5f;
-                    Gizmos.DrawLine(mid, mid - dir * 1f + perp);
-                    Gizmos.DrawLine(mid, mid - dir * 1f - perp);
+                    Gizmos.DrawLine(mid, mid - dir + perp);
+                    Gizmos.DrawLine(mid, mid - dir - perp);
                 }
             }
         }
 
-        // Active vehicles
         if (showDebugGizmos && Application.isPlaying && activeVehicles != null)
         {
             Gizmos.color = Color.green;
@@ -1679,7 +1792,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
         if (!Application.isPlaying)
         {
             ValidateAndRebuildGraph();
-            UpdateEditorConnectionsVisualization();
+            if (visualizeAllConnectionsEditor) DrawAllConnectionsIntoLineRenderer();
         }
     }
 
@@ -1693,14 +1806,12 @@ public class CentralizedNavigationSystem : MonoBehaviour
     public void CollectAllNodes()
     {
         nodes.Clear(); nodeMap.Clear();
-
         NavNode[] all = nodesParent != null
             ? nodesParent.GetComponentsInChildren<NavNode>(true)
             : FindObjectsOfType<NavNode>();
-
         nextNodeID = 0;
-        foreach (var n in all) if (n.nodeID >= nextNodeID) nextNodeID = n.nodeID + 1;
-
+        foreach (var n in all)
+            if (n != null && n.nodeID >= nextNodeID) nextNodeID = n.nodeID + 1;
         foreach (var n in all)
         {
             if (n == null) continue;
@@ -1709,28 +1820,25 @@ public class CentralizedNavigationSystem : MonoBehaviour
             nodes.Add(n);
             nodeMap[n.nodeID] = n;
         }
-
         ValidateConnections();
-        UpdateEditorConnectionsVisualization();
     }
 
     public bool SnapNodeToGround(NavNode node)
     {
         if (node == null) return false;
         Vector3 origin = node.transform.position + Vector3.up * snapRaycastOriginHeight;
-
         if (Physics.Raycast(origin, Vector3.down, out RaycastHit hit,
                             snapRaycastOriginHeight + 500f, snapLayer))
         {
-            Undo.RecordObject(node.transform, "Snap Node to Ground");
+            Undo.RecordObject(node.transform, "Snap Node To Ground");
             node.transform.position = hit.point + Vector3.up * snapNodeHeightOffset;
             if (snapAlignToSurface)
                 node.transform.rotation = Quaternion.FromToRotation(Vector3.up, hit.normal);
             EditorUtility.SetDirty(node.gameObject);
             return true;
         }
-
-        Debug.LogWarning($"[NavSystem] Snap missed for Node {node.nodeID}. Check snapLayer.");
+        Debug.LogWarning($"[NavSystem] Snap raycast missed Node {node.nodeID} — " +
+                         "check snapLayer and snapRaycastOriginHeight.");
         return false;
     }
 
@@ -1739,7 +1847,7 @@ public class CentralizedNavigationSystem : MonoBehaviour
     {
         int ok = 0, miss = 0;
         foreach (var n in nodes) { if (SnapNodeToGround(n)) ok++; else miss++; }
-        Debug.Log($"[NavSystem] Snap → {ok} snapped, {miss} missed.");
+        Debug.Log($"[NavSystem] Snap: {ok} snapped, {miss} missed.");
         EditorUtility.SetDirty(this);
     }
 
@@ -1759,24 +1867,18 @@ public class CentralizedNavigationSystem : MonoBehaviour
             }
         }
         ValidateConnections();
-        UpdateEditorConnectionsVisualization();
     }
 
     [ContextMenu("Clear All Connections")]
-    public void ClearAllConnections()
-    {
-        connectionDefinitions.Clear();
-        UpdateEditorConnectionsVisualization();
-    }
+    public void ClearAllConnections() => connectionDefinitions.Clear();
 
     [ContextMenu("Create Node Forward")]
     public void CreateNodeForward()
     {
-        NavNode last = nodes.Count > 0 ? nodes.Last() : null;
+        NavNode last = nodes.Count > 0 ? nodes[nodes.Count - 1] : null;
         Vector3 pos  = last != null
             ? last.transform.position + last.transform.forward * newNodeDistance
             : transform.position;
-
         NavNode n = CreateNode(pos, -1, last?.transform.rotation ?? Quaternion.identity);
         if (last != null) AddConnectionDefinition(last.nodeID, n.nodeID, true);
         Selection.activeGameObject = n.gameObject;
@@ -1787,10 +1889,11 @@ public class CentralizedNavigationSystem : MonoBehaviour
     {
         if (Selection.activeGameObject == null) return;
         NavNode sel = Selection.activeGameObject.GetComponent<NavNode>();
-        if (sel == null || sel.parentNavSystem != this) { Debug.LogWarning("No NavNode selected."); return; }
-
-        NavNode n = CreateNode(sel.transform.position + sel.transform.forward * newNodeDistance,
-                               -1, sel.transform.rotation);
+        if (sel == null || sel.parentNavSystem != this)
+        { Debug.LogWarning("[NavSystem] No NavNode selected."); return; }
+        NavNode n = CreateNode(
+            sel.transform.position + sel.transform.forward * newNodeDistance,
+            -1, sel.transform.rotation);
         AddConnectionDefinition(sel.nodeID, n.nodeID, true);
         Selection.activeGameObject = n.gameObject;
     }
@@ -1798,66 +1901,36 @@ public class CentralizedNavigationSystem : MonoBehaviour
     [ContextMenu("Setup Demo")]
     public void SetupDemo()
     {
-        ClearAllConnections();
-        nodes.Clear();
-        nodeMap.Clear();
-        nextNodeID = 0;
-
+        ClearAllConnections(); nodes.Clear(); nodeMap.Clear(); nextNodeID = 0;
         if (nodesParent == null)
+        { nodesParent = new GameObject("NavigationNodes"); nodesParent.transform.SetParent(transform); }
+        Vector3[] pos =
         {
-            nodesParent = new GameObject("NavigationNodes");
-            nodesParent.transform.SetParent(transform);
-        }
-
-        Vector3[] demoPositions =
-        {
-            new Vector3(  0, 0.5f,  0), new Vector3( 10, 0.5f,  0),
-            new Vector3( 15, 0.5f, 10), new Vector3( 10, 0.5f, 20),
-            new Vector3(  0, 0.5f, 20), new Vector3(-10, 0.5f, 10)
+            new Vector3(0,0.5f,0),  new Vector3(10,0.5f,0),
+            new Vector3(15,0.5f,10), new Vector3(10,0.5f,20),
+            new Vector3(0,0.5f,20), new Vector3(-10,0.5f,10),
         };
-
-        for (int i = 0; i < demoPositions.Length; i++)
-            CreateNode(demoPositions[i], -1, Quaternion.identity);
-
-        List<int> ids = nodes.Select(n => n.nodeID).ToList();
-        for (int i = 0; i < ids.Count - 1; i++)
-            AddConnectionDefinition(ids[i], ids[i + 1], true);
+        foreach (var p in pos) CreateNode(p);
+        var ids = nodes.Select(n => n.nodeID).ToList();
+        for (int i = 0; i < ids.Count - 1; i++) AddConnectionDefinition(ids[i], ids[i + 1], true);
         AddConnectionDefinition(ids[ids.Count - 1], ids[0], true);
-
         ValidateAndRebuildGraph();
-        UpdateEditorConnectionsVisualization();
-
-        Debug.Log("[NavSystem] Demo setup complete — 6 nodes in a hexagon.");
     }
 
-    private NavNode GetSelectedNode()
-    {
-        if (Selection.activeGameObject == null) return null;
-        NavNode sel = Selection.activeGameObject.GetComponent<NavNode>();
-        return (sel != null && sel.parentNavSystem == this) ? sel : null;
-    }
-
-    [ContextMenu("Test Path 0 To Last")]
+    [ContextMenu("Test Path Zero To Last")]
     public void TestPathZeroToLast()
     {
         if (nodes.Count < 2) return;
         var path = FindPath(nodes[0].nodeID, nodes[nodes.Count - 1].nodeID);
-        if (path.Count > 0) { Debug.Log($"Path: {string.Join(" → ", path)}"); VisualizePath(path); }
-        else Debug.LogError("No path found.");
-    }
-
-    [ContextMenu("Debug Print All Nodes")]
-    public void DebugPrintAllNodes()
-    {
-        Debug.Log($"══ Nodes ({nodes.Count}) ══");
-        foreach (var n in nodes)
-            if (n != null) Debug.Log($"  Node '{n.name}' ID={n.nodeID} Pos={n.worldPosition}");
+        if (path != null && path.Count > 0)
+        { Debug.Log($"[NavSystem] Test path: {string.Join(" → ", path)}"); VisualizePath(path); }
+        else Debug.LogError("[NavSystem] No path found between first and last node.");
     }
 
     [ContextMenu("Debug Print All Connections")]
     public void DebugPrintAllConnections()
     {
-        Debug.Log($"══ Connections ({connectionDefinitions.Count}) ══");
+        Debug.Log($"[NavSystem] ══ Connections ({connectionDefinitions.Count}) ══");
         foreach (var c in connectionDefinitions)
         {
             string fn = nodeMap.ContainsKey(c.fromNodeID) ? nodeMap[c.fromNodeID].name : "MISSING";
@@ -1866,42 +1939,27 @@ public class CentralizedNavigationSystem : MonoBehaviour
         }
     }
 
-    [ContextMenu("Debug Print Route Cache")]
-    public void DebugPrintRouteCache()
+    [ContextMenu("Debug Print Segment Cache")]
+    public void DebugPrintSegmentCache()
     {
-        Debug.Log($"══ Segment Cache ({_segmentCache.Count} entries) ══");
-        int totalPts = 0;
+        Debug.Log($"[NavSystem] ══ Segment Cache ({_segmentCache.Count}) ══");
+        int total = 0;
         foreach (var kvp in _segmentCache)
         {
-            totalPts += kvp.Value.Length;
             Debug.Log($"  {kvp.Key.Item1}→{kvp.Key.Item2}: {kvp.Value.Length} waypoints");
+            total += kvp.Value.Length;
         }
-        Debug.Log($"  Total waypoints in cache: {totalPts} (~{totalPts * 12 / 1024} KB)");
+        Debug.Log($"  Total waypoints in memory: {total}");
     }
 
     [ContextMenu("Debug Print Route Pool")]
     public void DebugPrintRoutePool()
     {
-        Debug.Log($"══ Route Pool ({_routePool.Count} source nodes) ══");
+        Debug.Log($"[NavSystem] ══ Route Pool ({_routePool.Count} source nodes) ══");
+        int total = 0;
         foreach (var kvp in _routePool)
-            Debug.Log($"  Node {kvp.Key}: {kvp.Value.Count} pre-baked routes");
-        int emptyNodes = _routePool.Values.Count(p => p.Count == 0);
-        if (emptyNodes > 0)
-            Debug.LogWarning($"  ⚠️ {emptyNodes} nodes with zero routes — check connectivity.");
-    }
-
-    [ContextMenu("Debug Print Route Occupancy")]
-    public void DebugPrintRouteOccupancy()
-    {
-        Debug.Log($"══ Route Occupancy ({_routeOccupancy.Count} active routes) ══");
-        foreach (var kvp in _routeOccupancy.OrderByDescending(k => k.Value))
-            Debug.Log($"  {kvp.Key.src}→{kvp.Key.dst}: {kvp.Value}/{MAX_NPCS_PER_ROUTE} NPCs");
-    }
-
-    private void UpdateEditorConnectionsVisualization()
-    {
-        if (Application.isPlaying || !visualizeAllConnectionsEditor) return;
-        DrawAllConnectionsIntoLineRenderer();
+        { Debug.Log($"  Node {kvp.Key}: {kvp.Value.Count} routes"); total += kvp.Value.Count; }
+        Debug.Log($"  Total routes in pool: {total}");
     }
 
     private void DrawAllConnectionsIntoLineRenderer()
@@ -1915,56 +1973,66 @@ public class CentralizedNavigationSystem : MonoBehaviour
             positions.Add(nodeMap[conn.toNodeID].transform.position   + Vector3.up * 0.3f);
         }
         pathLineRenderer.positionCount = positions.Count;
-        pathLineRenderer.SetPositions(positions.ToArray());
+        if (positions.Count > 0) pathLineRenderer.SetPositions(positions.ToArray());
         pathLineRenderer.enabled = positions.Count > 0;
     }
 #endif
 
     // =========================================================================
-    //  PRIORITY QUEUE (A*)
+    //  PRIORITY QUEUE  (A* helper)
     // =========================================================================
 
     public class PriorityQueue<T>
     {
-        private readonly List<(T item, float priority)> _elements = new List<(T, float)>();
-        public int Count => _elements.Count;
+        private readonly List<(T item, float priority)> _heap = new List<(T, float)>();
+        public int Count => _heap.Count;
 
         public void Enqueue(T item, float priority)
         {
-            _elements.Add((item, priority));
-            int i = _elements.Count - 1;
-            while (i > 0 && _elements[i - 1].priority > _elements[i].priority)
+            _heap.Add((item, priority));
+            int i = _heap.Count - 1;
+            while (i > 0 && _heap[(i - 1) / 2].priority > _heap[i].priority)
             {
-                var tmp          = _elements[i - 1];
-                _elements[i - 1] = _elements[i];
-                _elements[i]     = tmp;
-                i--;
+                int parent = (i - 1) / 2;
+                (_heap[parent], _heap[i]) = (_heap[i], _heap[parent]);
+                i = parent;
             }
         }
 
         public T Dequeue()
         {
-            var best = _elements[0];
-            _elements.RemoveAt(0);
-            return best.item;
+            T root = _heap[0].item;
+            int last = _heap.Count - 1;
+            _heap[0] = _heap[last];
+            _heap.RemoveAt(last);
+            int i = 0;
+            while (true)
+            {
+                int l = 2 * i + 1, r = 2 * i + 2, smallest = i;
+                if (l < _heap.Count && _heap[l].priority < _heap[smallest].priority) smallest = l;
+                if (r < _heap.Count && _heap[r].priority < _heap[smallest].priority) smallest = r;
+                if (smallest == i) break;
+                (_heap[i], _heap[smallest]) = (_heap[smallest], _heap[i]);
+                i = smallest;
+            }
+            return root;
         }
 
-        public bool Contains(T item)
-            => _elements.Any(e => EqualityComparer<T>.Default.Equals(e.item, item));
+        public bool Contains(T item) => _heap.Any(e => EqualityComparer<T>.Default.Equals(e.item, item));
     }
 }
 
 // =============================================================================
-//  TRAFFIC CHAIN (legacy — kept for compatibility)
+//  LEGACY TRAFFIC CHAIN  (kept for backwards compatibility)
 // =============================================================================
 
 [System.Serializable]
 public class TrafficWaypointChain
 {
-    public string         chainName     = "Traffic_Chain";
-    public List<Transform> waypoints    = new List<Transform>();
-    public List<int>       nodeIDs      = new List<int>();
-    public bool            loop         = false;
+    public string         chainName       = "Traffic_Chain";
+    public List<Transform> waypoints      = new List<Transform>();
+    public List<int>       nodeIDs        = new List<int>();
+    public bool            loop           = false;
     [Range(0.5f, 3f)]
     public float           speedMultiplier = 1f;
 }
