@@ -1,17 +1,12 @@
 #if UNITY_EDITOR
 // ============================================================================
-//  CENTRALIZED NAVIGATION MENU ITEMS
+//  CENTRALIZED NAVIGATION MENU ITEMS  v8.0
 //  ============================================================================
-//  Top-menu shortcuts for common Navigation system tasks.
+//  Top-menu shortcuts for the CentralizedNavigationSystem workflow.
 //
-//  FIXED v7.0:
-//    Removed all references to old CentralizedCarController fields/methods
-//    that no longer exist:
-//      targetNode, autoFindPath, showDebugLogs, FindAndFollowPath()
-//
-//  CentralizedCarController v3.0 is VISUALIZATION ONLY.
-//  It has no targetNode, no autoFindPath, no FindAndFollowPath.
-//  Movement is handled exclusively by VehicleController (NWH VehiclePhysics2).
+//  IMPORTANT — CentralizedCarController v3.0 is VISUALIZATION ONLY.
+//  It has NO targetNode, NO autoFindPath, NO FindAndFollowPath().
+//  VehicleController (NWH VehiclePhysics2) owns all movement physics.
 // ============================================================================
 
 using UnityEngine;
@@ -26,245 +21,253 @@ public static class CentralizedNavigationMenuItems
     [MenuItem("Navigation/Centralized/Create Navigation System")]
     private static void CreateNavigationSystem()
     {
-        var navSysObj = new GameObject("CentralizedNavigationSystem");
-        navSysObj.AddComponent<CentralizedNavigationSystem>();
-        Selection.activeGameObject = navSysObj;
-        EditorGUIUtility.PingObject(navSysObj);
+        var obj = new GameObject("CentralizedNavigationSystem");
+        obj.AddComponent<CentralizedNavigationSystem>();
+        Selection.activeGameObject = obj;
+        EditorGUIUtility.PingObject(obj);
         Debug.Log("[NavMenu] CentralizedNavigationSystem created.");
     }
 
     [MenuItem("Navigation/Centralized/Create Nav Node")]
     private static void CreateNavNode()
     {
-        CentralizedNavigationSystem navSystem = FindNavSystem();
+        var nav = FindNavSystem();
 
-        Vector3 position = Vector3.zero;
+        Vector3 pos = Vector3.zero;
         if (SceneView.lastActiveSceneView != null)
-            position = SceneView.lastActiveSceneView.pivot;
+            pos = SceneView.lastActiveSceneView.pivot;
 
-        NavNode createdNode;
-
-        if (navSystem != null)
+        NavNode created;
+        if (nav != null)
         {
-            createdNode = navSystem.CreateNode(position);
+            created = nav.CreateNode(pos);
         }
         else
         {
-            // Standalone node when no system exists yet
             var nodeObj = new GameObject("NavNode");
-            createdNode = nodeObj.AddComponent<NavNode>();
-            nodeObj.transform.position = position;
-            createdNode.nodeID = 0;
+            created = nodeObj.AddComponent<NavNode>();
+            nodeObj.transform.position = pos;
+            created.nodeID = 0;
         }
 
-        Selection.activeGameObject = createdNode.gameObject;
-        EditorGUIUtility.PingObject(createdNode.gameObject);
+        Selection.activeGameObject = created.gameObject;
+        EditorGUIUtility.PingObject(created.gameObject);
     }
 
     /// <summary>
     /// Creates a test car with CentralizedCarController (VISUALIZATION ONLY).
-    /// Movement is handled by VehicleController — this just adds route visualization.
+    /// VehicleController handles all movement — this just shows the planned route.
     /// </summary>
     [MenuItem("Navigation/Centralized/Create Test Car (Visualization Only)")]
     private static void CreateTestCar()
     {
-        // Create a simple car-shaped cube for testing
-        var carObj = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        carObj.name = "TestCar_Visualization";
-        carObj.transform.localScale = new Vector3(2f, 1f, 4f);
+        var obj = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        obj.name = "TestCar_Visualization";
+        obj.transform.localScale = new Vector3(2f, 1f, 4f);
 
-        var renderer = carObj.GetComponent<Renderer>();
-        if (renderer != null)
+        var rend = obj.GetComponent<Renderer>();
+        if (rend != null)
         {
-            renderer.sharedMaterial = new Material(Shader.Find("Standard"));
-            renderer.sharedMaterial.color = Color.blue;
+            rend.sharedMaterial = new Material(Shader.Find("Standard"));
+            rend.sharedMaterial.color = Color.blue;
         }
 
-        // Add the visualization controller
-        var carController = carObj.AddComponent<CentralizedCarController>();
+        var ctrl = obj.AddComponent<CentralizedCarController>();
 
-        // Wire up nav system if present
-        CentralizedNavigationSystem navSystem = FindNavSystem();
-        if (navSystem != null)
+        var nav = FindNavSystem();
+        if (nav != null)
         {
-            carController.navSystem = navSystem;
-            Debug.Log("[NavMenu] TestCar created and linked to CentralizedNavigationSystem.");
+            ctrl.navSystem = nav;
+            Debug.Log("[NavMenu] TestCar created and linked to CentralizedNavigationSystem.\n" +
+                      "followPath=false (default). Attach VehicleController for physics.");
         }
         else
         {
-            Debug.LogWarning("[NavMenu] No CentralizedNavigationSystem in scene. " +
+            Debug.LogWarning("[NavMenu] No CentralizedNavigationSystem found.\n" +
                              "Create one first, then assign it to the car's navSystem field.");
         }
 
-        Selection.activeGameObject = carObj;
-        EditorGUIUtility.PingObject(carObj);
+        Selection.activeGameObject = obj;
+        EditorGUIUtility.PingObject(obj);
     }
 
-    [MenuItem("Navigation/Centralized/Setup Demo Scene")]
+    [MenuItem("Navigation/Centralized/Setup Demo Scene (6 nodes)")]
     private static void SetupDemoScene()
     {
-        // Navigation system
-        var navSysObj = new GameObject("CentralizedNavigationSystem");
-        var navSystem = navSysObj.AddComponent<CentralizedNavigationSystem>();
+        var navObj = new GameObject("CentralizedNavigationSystem");
+        var nav    = navObj.AddComponent<CentralizedNavigationSystem>();
 
-        // 5×5 grid of nodes
-        const int   gridSize = 5;
-        const float spacing  = 5f;
+        Vector3[] positions =
+        {
+            new Vector3(  0f, 0.5f,  0f),
+            new Vector3( 10f, 0.5f,  0f),
+            new Vector3( 15f, 0.5f, 10f),
+            new Vector3( 10f, 0.5f, 20f),
+            new Vector3(  0f, 0.5f, 20f),
+            new Vector3(-10f, 0.5f, 10f),
+        };
+        foreach (var p in positions) nav.CreateNode(p);
+        nav.AutoConnectNodes();
 
-        for (int x = 0; x < gridSize; x++)
-            for (int z = 0; z < gridSize; z++)
-                navSystem.CreateNode(new Vector3(x * spacing, 0f, z * spacing), x * gridSize + z);
-
-        navSystem.AutoConnectNodes();
-
-        // Test car — visualization only
         var carObj = GameObject.CreatePrimitive(PrimitiveType.Cube);
         carObj.name = "TestCar_Visualization";
-        carObj.transform.position = new Vector3(0f, 0.5f, 0f);
+        carObj.transform.position   = new Vector3(0f, 0.5f, 0f);
         carObj.transform.localScale = new Vector3(2f, 1f, 4f);
 
-        var renderer = carObj.GetComponent<Renderer>();
-        if (renderer != null)
-        {
-            renderer.sharedMaterial = new Material(Shader.Find("Standard"));
-            renderer.sharedMaterial.color = Color.blue;
-        }
+        var rend = carObj.GetComponent<Renderer>();
+        if (rend != null) { rend.sharedMaterial = new Material(Shader.Find("Standard")); rend.sharedMaterial.color = Color.blue; }
 
-        var carController = carObj.AddComponent<CentralizedCarController>();
-        carController.navSystem  = navSystem;
-        carController.followPath = false; // off by default — VehicleController drives in production
+        var ctrl = carObj.AddComponent<CentralizedCarController>();
+        ctrl.navSystem  = nav;
+        ctrl.followPath = false;
 
-        Debug.Log($"[NavMenu] Demo scene created: {gridSize * gridSize} nodes in a {gridSize}×{gridSize} grid.\n" +
-                  "CentralizedCarController is set to visualization-only mode.\n" +
-                  "Attach VehicleController for actual driving physics.");
-
-        Selection.activeGameObject = navSysObj;
-        EditorGUIUtility.PingObject(navSysObj);
+        Debug.Log("[NavMenu] Demo scene: 6 nodes, connected. CentralizedCarController = visualization only.");
+        Selection.activeGameObject = navObj;
+        EditorGUIUtility.PingObject(navObj);
     }
 
     // =========================================================================
     //  GRAPH TOOLS
     // =========================================================================
 
-    [MenuItem("Navigation/Centralized/Organize All Nodes")]
+    [MenuItem("Navigation/Centralized/Graph/Organize All Nodes")]
     private static void OrganizeAllNodes()
     {
-        CentralizedNavigationSystem navSystem = FindNavSystem();
-        if (navSystem == null)
-        {
-            Debug.LogWarning("[NavMenu] No CentralizedNavigationSystem in scene.");
-            return;
-        }
-        navSystem.CollectAllNodes();
-        EditorUtility.SetDirty(navSystem);
-        Debug.Log($"[NavMenu] Organized all nodes under '{navSystem.name}'.");
+        var nav = FindNavSystem();
+        if (nav == null) { Warn("No CentralizedNavigationSystem in scene."); return; }
+        nav.CollectAllNodes();
+        EditorUtility.SetDirty(nav);
+        Debug.Log($"[NavMenu] Nodes organized under '{nav.name}'.");
     }
 
-    [MenuItem("Navigation/Centralized/Validate & Rebuild Graph")]
+    [MenuItem("Navigation/Centralized/Graph/Validate and Rebuild Graph")]
     private static void ValidateGraph()
     {
-        CentralizedNavigationSystem navSystem = FindNavSystem();
-        if (navSystem == null)
-        {
-            Debug.LogWarning("[NavMenu] No CentralizedNavigationSystem in scene.");
-            return;
-        }
-        navSystem.ValidateAndRebuildGraph();
-        EditorUtility.SetDirty(navSystem);
+        var nav = FindNavSystem();
+        if (nav == null) { Warn("No CentralizedNavigationSystem in scene."); return; }
+        nav.ValidateAndRebuildGraph();
+        EditorUtility.SetDirty(nav);
         Debug.Log("[NavMenu] Graph validated and rebuilt.");
     }
 
-    [MenuItem("Navigation/Centralized/Debug Print Connections")]
-    private static void DebugPrintConnections()
+    [MenuItem("Navigation/Centralized/Graph/Auto Connect All Nodes")]
+    private static void AutoConnect()
     {
-        CentralizedNavigationSystem navSystem = FindNavSystem();
-        if (navSystem == null)
-        {
-            Debug.LogWarning("[NavMenu] No CentralizedNavigationSystem in scene.");
-            return;
-        }
-        navSystem.DebugPrintAllConnections();
+        var nav = FindNavSystem();
+        if (nav == null) { Warn("No CentralizedNavigationSystem in scene."); return; }
+        nav.AutoConnectNodes();
+        EditorUtility.SetDirty(nav);
+        Debug.Log("[NavMenu] Auto-connect complete.");
     }
 
-    [MenuItem("Navigation/Centralized/Debug Print Segment Cache")]
-    private static void DebugPrintSegmentCache()
+    [MenuItem("Navigation/Centralized/Graph/Clear All Connections")]
+    private static void ClearConnections()
     {
-        CentralizedNavigationSystem navSystem = FindNavSystem();
-        if (navSystem == null)
+        var nav = FindNavSystem();
+        if (nav == null) { Warn("No CentralizedNavigationSystem in scene."); return; }
+        if (EditorUtility.DisplayDialog("Clear All Connections",
+            $"Delete all {nav.connectionDefinitions.Count} connections?", "Delete", "Cancel"))
         {
-            Debug.LogWarning("[NavMenu] No CentralizedNavigationSystem in scene.");
-            return;
+            Undo.RecordObject(nav, "Clear All Connections");
+            nav.ClearAllConnections();
+            EditorUtility.SetDirty(nav);
         }
-        navSystem.DebugPrintSegmentCache();
     }
 
-    [MenuItem("Navigation/Centralized/Debug Print Route Pool")]
-    private static void DebugPrintRoutePool()
+    // =========================================================================
+    //  DEBUG
+    // =========================================================================
+
+    [MenuItem("Navigation/Centralized/Debug/Print All Connections")]
+    private static void PrintConnections()
     {
-        CentralizedNavigationSystem navSystem = FindNavSystem();
-        if (navSystem == null)
-        {
-            Debug.LogWarning("[NavMenu] No CentralizedNavigationSystem in scene.");
-            return;
-        }
-        navSystem.DebugPrintRoutePool();
+        var nav = FindNavSystem();
+        if (nav == null) { Warn("No CentralizedNavigationSystem in scene."); return; }
+        nav.DebugPrintAllConnections();
+    }
+
+    [MenuItem("Navigation/Centralized/Debug/Print Segment Cache")]
+    private static void PrintSegments()
+    {
+        var nav = FindNavSystem();
+        if (nav == null) { Warn("No CentralizedNavigationSystem in scene."); return; }
+        nav.DebugPrintSegmentCache();
+    }
+
+    [MenuItem("Navigation/Centralized/Debug/Print Route Pool")]
+    private static void PrintRoutePool()
+    {
+        var nav = FindNavSystem();
+        if (nav == null) { Warn("No CentralizedNavigationSystem in scene."); return; }
+        nav.DebugPrintRoutePool();
+    }
+
+    [MenuItem("Navigation/Centralized/Debug/Test Path (First → Last Node)")]
+    private static void TestPath()
+    {
+        var nav = FindNavSystem();
+        if (nav == null) { Warn("No CentralizedNavigationSystem in scene."); return; }
+        nav.TestPathZeroToLast();
     }
 
     // =========================================================================
     //  CAR CONTROLLER TOOLS
     // =========================================================================
 
-    /// <summary>
-    /// Prints current reaction time stats from CentralizedCarController.
-    /// </summary>
-    [MenuItem("Navigation/Centralized/Debug Car Reaction Times")]
-    private static void DebugCarReactionTimes()
+    [MenuItem("Navigation/Centralized/Car/Debug Reaction Times")]
+    private static void DebugReactionTimes()
     {
-#if UNITY_2023_1_OR_NEWER
-        var car = Object.FindFirstObjectByType<CentralizedCarController>();
-#else
-        var car = Object.FindObjectOfType<CentralizedCarController>();
-#endif
-        if (car == null)
-        {
-            Debug.LogWarning("[NavMenu] No CentralizedCarController in scene.");
-            return;
-        }
+        var car = FindCar();
+        if (car == null) { Warn("No CentralizedCarController in scene."); return; }
 
         float avg   = car.GetAverageReactionTime();
         float worst = car.GetWorstReactionTime();
 
-        Debug.Log($"[NavMenu] Car Reaction Times — " +
-                  $"Avg: {(avg   >= 0 ? $"{avg   * 1000f:F0} ms" : "no data")} | " +
-                  $"Worst: {(worst >= 0 ? $"{worst * 1000f:F0} ms" : "no data")} | " +
+        Debug.Log($"[NavMenu] Reaction Times — " +
+                  $"Avg: {(avg   >= 0 ? $"{avg   * 1000f:F0} ms" : "no data")}  |  " +
+                  $"Worst: {(worst >= 0 ? $"{worst * 1000f:F0} ms" : "no data")}  |  " +
                   $"Route: {car.CurrentSourceNode} → {car.CurrentDestNode}");
     }
 
-    /// <summary>
-    /// Forces a route refresh on the CentralizedCarController (at runtime).
-    /// </summary>
-    [MenuItem("Navigation/Centralized/Force Car Route Refresh")]
-    private static void ForceCarRouteRefresh()
+    [MenuItem("Navigation/Centralized/Car/Force Route Refresh (Play Mode)")]
+    private static void ForceRouteRefresh()
     {
-#if UNITY_2023_1_OR_NEWER
-        var car = Object.FindFirstObjectByType<CentralizedCarController>();
-#else
-        var car = Object.FindObjectOfType<CentralizedCarController>();
-#endif
-        if (car == null)
-        {
-            Debug.LogWarning("[NavMenu] No CentralizedCarController in scene.");
-            return;
-        }
-
-        if (!Application.isPlaying)
-        {
-            Debug.LogWarning("[NavMenu] Force Route Refresh only works in Play mode.");
-            return;
-        }
-
+        if (!Application.isPlaying) { Warn("Force Route Refresh only works in Play mode."); return; }
+        var car = FindCar();
+        if (car == null) { Warn("No CentralizedCarController in scene."); return; }
         car.ForceRouteRefresh();
         Debug.Log("[NavMenu] Car route refresh triggered.");
+    }
+
+    [MenuItem("Navigation/Centralized/Car/Clear Reaction Data (Play Mode)")]
+    private static void ClearReactionData()
+    {
+        if (!Application.isPlaying) { Warn("Clear Reaction Data only works in Play mode."); return; }
+        var car = FindCar();
+        if (car == null) { Warn("No CentralizedCarController in scene."); return; }
+        car.ClearReactionData();
+        Debug.Log("[NavMenu] Reaction time data cleared.");
+    }
+
+    // =========================================================================
+    //  BAKING SHORTCUTS
+    // =========================================================================
+
+    [MenuItem("Navigation/Centralized/Bake/Bake Full Route Cache")]
+    private static void BakeCache()
+    {
+        var nav = FindNavSystem();
+        if (nav == null) { Warn("No CentralizedNavigationSystem in scene."); return; }
+        if (Application.isPlaying) { Warn("Cannot bake in Play mode. Stop Play first."); return; }
+        nav.EditorBakeFullCache();
+    }
+
+    [MenuItem("Navigation/Centralized/Bake/Clear Route Cache")]
+    private static void ClearCache()
+    {
+        var nav = FindNavSystem();
+        if (nav == null) { Warn("No CentralizedNavigationSystem in scene."); return; }
+        nav.EditorClearCache();
     }
 
     // =========================================================================
@@ -279,5 +282,16 @@ public static class CentralizedNavigationMenuItems
         return Object.FindObjectOfType<CentralizedNavigationSystem>();
 #endif
     }
+
+    private static CentralizedCarController FindCar()
+    {
+#if UNITY_2023_1_OR_NEWER
+        return Object.FindFirstObjectByType<CentralizedCarController>();
+#else
+        return Object.FindObjectOfType<CentralizedCarController>();
+#endif
+    }
+
+    private static void Warn(string msg) => Debug.LogWarning($"[NavMenu] {msg}");
 }
 #endif

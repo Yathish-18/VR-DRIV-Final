@@ -2,37 +2,30 @@
 //  CENTRALIZED CAR CONTROLLER  v3.0  —  PLAYER ROUTE VISUALIZATION ONLY
 //  ============================================================================
 //  PURPOSE:
-//    Visualizes the player car's current planned route as a line in the scene.
-//    That's it. This script does NOTHING else.
+//    Draws the player car's planned route on screen as a line renderer.
+//    Also tracks brake reaction time for research/scoring purposes.
+//    That is ALL this script does.
 //
-//  WHAT THIS SCRIPT DOES NOT DO:
-//    ✗ Does NOT touch any Rigidbody
-//    ✗ Does NOT set velocity, forces, or constraints
-//    ✗ Does NOT move the car
-//    ✗ Does NOT handle input
-//    ✗ Does NOT compete with VehicleController.cs in any way
+//  DOES NOT:
+//    ✗ Touch any Rigidbody  (no velocity, forces, or constraints — ever)
+//    ✗ Move the car
+//    ✗ Handle input
+//    ✗ Compete with VehicleController (NWH VehiclePhysics2)
 //
-//  WHAT THIS SCRIPT DOES:
-//    ✓ Finds the nearest NavNode to the player car each frame
+//  DOES:
+//    ✓ Finds nearest NavNode to the player each frame (cached, 4Hz)
 //    ✓ Requests a route from CentralizedNavigationSystem
-//    ✓ Calls VisualizePlayerPath() to draw the route as a line renderer
-//    ✓ Provides a test "follow path" mode (editor/debug only)
-//    ✓ Measures brake reaction time (research data, read-only)
+//    ✓ Calls VisualizePlayerPath() → draws trimmed route ahead of car
+//    ✓ Measures brake reaction time (obstacle ray + speed read-only check)
+//    ✓ Provides GetAverageReactionTime() / GetWorstReactionTime() for scoring
+//    ✓ Provides test followPath mode (Transform only, no Rigidbody)
 //
-//  PHYSICS SAFETY:
-//    This script caches but NEVER modifies the Rigidbody.
-//    All movement in follow-path test mode uses Transform.position directly
-//    (kinematic-style) so it cannot interfere with VehicleController physics.
-//    Set followPath = false (default) for normal gameplay — script becomes
-//    pure visualization with zero runtime cost.
-//
-//  RIGIDBODY HISTORY:
-//    Previous versions grabbed the Rigidbody in Awake() and wrote
-//    rb.linearVelocity every frame, causing:
-//      • Player input to feel sluggish
-//      • Car slowing down unexpectedly
-//      • Input fighting between this script and VehicleController
-//    All Rigidbody writes are permanently removed.
+//  HISTORY:
+//    v1/v2 grabbed Rigidbody in Awake() and wrote rb.linearVelocity every
+//    frame, causing player input to feel sluggish and the car to slow down.
+//    All Rigidbody writes are permanently removed in v3.0.
+//    The Rigidbody is read (speed only) in MeasureBrakeReaction() but
+//    is never written to under any circumstances.
 // ============================================================================
 
 using UnityEngine;
@@ -46,76 +39,76 @@ public class CentralizedCarController : MonoBehaviour
     // =========================================================================
 
     [Header("═══  NAVIGATION SYSTEM  ═══")]
-
-    [Tooltip("Reference to the CentralizedNavigationSystem in the scene.")]
+    [Tooltip("Reference to CentralizedNavigationSystem. Auto-found if null.")]
     public CentralizedNavigationSystem navSystem;
 
     [Header("═══  ROUTE VISUALIZATION  ═══")]
-
-    [Tooltip("Show the player car's planned route as a line in the scene view and game view.")]
+    [Tooltip("Draw the player car's planned route as a line in the scene.")]
     public bool showRouteVisualization = true;
 
-    [Tooltip("Interval in seconds between route refresh checks. " +
-             "Lower = more responsive but slightly more CPU. 0.5s is fine for most roads.")]
-    [Range(0.1f, 2f)]
+    [Tooltip("How often (seconds) to check if a new route is needed.\n" +
+             "0.5s is responsive enough for normal driving.")]
+    [Range(0.1f, 3f)]
     public float routeRefreshInterval = 0.5f;
 
-    [Header("═══  FOLLOW PATH (Test / Debug Only)  ═══")]
-
-    [Tooltip("When true, the car autonomously follows the planned route using Transform.position.\n\n" +
+    [Header("═══  FOLLOW PATH  (Test / Debug Only)  ═══")]
+    [Tooltip("When true the car follows the route using Transform.position.\n\n" +
              "FOR TESTING ONLY — disable in production.\n" +
-             "Uses kinematic movement (no Rigidbody writes) so it cannot fight VehicleController.\n" +
-             "However, with this ON the physics car will be overridden visually.")]
+             "Uses kinematic Transform movement so it cannot fight VehicleController.\n" +
+             "With this ON the physics car will be overridden visually.")]
     public bool followPath = false;
 
-    [Tooltip("Speed in m/s when followPath is enabled. Does not affect VehicleController speed.")]
+    [Tooltip("Speed in m/s used by the test follow mode. Does not affect VehicleController.")]
     [Range(1f, 30f)]
     public float testFollowSpeed = 10f;
 
-    [Tooltip("Turn speed when followPath is enabled.")]
+    [Tooltip("Turn speed used by the test follow mode.")]
     [Range(1f, 10f)]
     public float testTurnSpeed = 4f;
 
-    [Tooltip("XZ distance at which a waypoint is considered reached during test follow.")]
+    [Tooltip("XZ distance at which a waypoint is reached in test follow mode.")]
     [Range(1f, 10f)]
     public float testWaypointReachDistance = 4f;
 
-    [Header("═══  BRAKE REACTION (Research Data)  ═══")]
-
-    [Tooltip("Layer(s) for the forward obstacle detection ray. Does not affect car movement.")]
+    [Header("═══  BRAKE REACTION  (Research / Scoring)  ═══")]
+    [Tooltip("Layer(s) for the forward obstacle detection ray.\n" +
+             "Does not affect car movement — read-only research data.")]
     public LayerMask obstacleDetectionLayer;
 
-    [Tooltip("How far ahead to cast the reaction-time ray.")]
-    [Range(5f, 50f)]
+    [Tooltip("How far ahead (metres) to cast the obstacle detection ray.")]
+    [Range(5f, 60f)]
     public float reactionRayDistance = 20f;
 
     // =========================================================================
     //  PRIVATE STATE
     // =========================================================================
 
-    // Route data
-    private List<int>     _currentNodePath = new List<int>();
+    // Route
+    private List<int>     _currentNodePath  = new List<int>();
     private List<Vector3> _currentWaypoints = new List<Vector3>();
     private int           _waypointIndex    = 0;
     private int           _currentSourceNode = -1;
     private int           _currentDestNode   = -1;
     private float         _routeRefreshTimer = 0f;
 
-    // Brake reaction measurement (research only — no movement impact)
-    private bool  _obstacleDetectedLastFrame = false;
-    private float _obstacleFirstSeenTime     = -1f;
-    private bool  _reactionFired             = false;
-    private float _lastReactionTime          = -1f;
+    // Closest node cache (refreshed at CLOSEST_NODE_CACHE_HZ)
+    private int   _lastClosestNode        = -1;
+    private float _closestNodeCacheTimer  = 0f;
+    private const float CLOSEST_NODE_CACHE_HZ = 0.25f;
 
-    // Reaction time history for average / worst tracking
-    private float _reactionTimeSum           = 0f;
-    private int   _reactionTimeCount         = 0;
-    private float _worstReactionTime         = -1f;
+    // Brake reaction measurement
+    private bool  _obstacleLastFrame      = false;
+    private float _obstacleFirstSeenTime  = -1f;
+    private bool  _reactionFired          = false;
+    private float _lastReactionTime       = -1f;
 
-    // Closest node cache
-    private int   _lastClosestNode = -1;
-    private float _closestNodeCacheTimer = 0f;
-    private const float CLOSEST_NODE_CACHE_INTERVAL = 0.25f;
+    // Reaction time history
+    private float _reactionTimeSum        = 0f;
+    private int   _reactionTimeCount      = 0;
+    private float _worstReactionTime      = -1f;
+
+    // Rigidbody — read-only reference, never written to
+    private Rigidbody _rb;
 
     // =========================================================================
     //  LIFECYCLE
@@ -123,7 +116,7 @@ public class CentralizedCarController : MonoBehaviour
 
     private void Start()
     {
-        // Auto-find nav system if not assigned
+        // Auto-find nav system
         if (navSystem == null)
         {
 #if UNITY_2023_1_OR_NEWER
@@ -133,51 +126,49 @@ public class CentralizedCarController : MonoBehaviour
 #endif
             if (navSystem == null)
             {
-                Debug.LogError($"[CarController] {name}: No CentralizedNavigationSystem found in scene. " +
+                Debug.LogError($"[CarController] {name}: No CentralizedNavigationSystem found. " +
                                "Route visualization disabled.");
                 enabled = false;
                 return;
             }
         }
 
-        // NOTE: We intentionally do NOT get or modify any Rigidbody here.
-        // VehicleController.cs owns the Rigidbody completely.
-        // This script has zero physics involvement.
+        // Cache Rigidbody for read-only speed access in MeasureBrakeReaction()
+        // We NEVER write to this — VehicleController owns it completely.
+        _rb = GetComponent<Rigidbody>();
     }
 
     private void Update()
     {
         if (navSystem == null) return;
 
-        // ── Route refresh ─────────────────────────────────────────────────────
-        _routeRefreshTimer       += Time.deltaTime;
-        _closestNodeCacheTimer   += Time.deltaTime;
+        _routeRefreshTimer     += Time.deltaTime;
+        _closestNodeCacheTimer += Time.deltaTime;
 
+        // Route refresh
         if (_routeRefreshTimer >= routeRefreshInterval)
         {
             _routeRefreshTimer = 0f;
             RefreshRouteIfNeeded();
         }
 
-        // ── Path visualization ────────────────────────────────────────────────
+        // Visualization
         if (showRouteVisualization && _currentNodePath.Count > 0)
             navSystem.VisualizePlayerPath(_currentNodePath, transform.position);
         else if (!showRouteVisualization)
             navSystem.ClearPathVisualization();
 
-        // ── Test follow path (debug only, no Rigidbody) ───────────────────────
+        // Test follow mode (Transform only — no Rigidbody writes)
         if (followPath && _currentWaypoints.Count > 0)
             TestFollowPath();
 
-        // ── Brake reaction measurement (research data, read-only) ─────────────
+        // Brake reaction measurement (read-only research data)
         MeasureBrakeReaction();
     }
 
     private void OnDisable()
     {
-        // Clean up visualization when component is disabled
-        if (navSystem != null)
-            navSystem.ClearPathVisualization();
+        if (navSystem != null) navSystem.ClearPathVisualization();
     }
 
     // =========================================================================
@@ -191,50 +182,36 @@ public class CentralizedCarController : MonoBehaviour
         int closestNode = GetClosestNodeCached();
         if (closestNode == -1) return;
 
-        // Only request a new route if we've moved to a new source node
-        // or we don't have a route yet
-        bool needsNewRoute = _currentNodePath.Count == 0
-                          || closestNode != _currentSourceNode;
-
-        if (!needsNewRoute) return;
+        // Request new route only when we've moved to a different source node
+        // or we have no route yet
+        if (_currentNodePath.Count > 0 && closestNode == _currentSourceNode) return;
 
         var result = navSystem.RequestRoute(closestNode);
-
         if (!result.success)
         {
-            Debug.LogWarning($"[CarController] Route request failed from node {closestNode}: " +
-                             result.failReason);
+            Debug.LogWarning($"[CarController] Route request failed from node {closestNode}: {result.failReason}");
             return;
         }
 
-        // Release old route occupancy
+        // Release old occupancy
         if (_currentSourceNode != -1 && _currentDestNode != -1)
             navSystem.ReleaseRoute(_currentSourceNode, _currentDestNode);
 
         _currentSourceNode = result.sourceNodeID;
         _currentDestNode   = result.destinationNodeID;
-        _currentNodePath   = result.waypoints != null ? new List<int>() : new List<int>();
+        _currentWaypoints  = result.waypoints ?? new List<Vector3>();
+        _waypointIndex     = 0;
 
-        // Store waypoints for test-follow mode
-        _currentWaypoints = result.waypoints ?? new List<Vector3>();
-        _waypointIndex    = 0;
-
-        // Invalidate visualization cache so it rebuilds with new path
         navSystem.InvalidatePlayerPathCache();
 
-        // Build node path for visualization (closest path from node graph)
-        RebuildNodePathFromWaypoints(result.sourceNodeID, result.destinationNodeID);
-    }
-
-    private void RebuildNodePathFromWaypoints(int srcID, int dstID)
-    {
-        List<int> nodePath = navSystem.FindPath(srcID, dstID);
+        // Rebuild node path for the line renderer
+        var nodePath = navSystem.FindPath(result.sourceNodeID, result.destinationNodeID);
         _currentNodePath = nodePath ?? new List<int>();
     }
 
     /// <summary>
-    /// Manually request a new route. Call this from other scripts
-    /// (e.g. when the player enters a new area or the destination changes).
+    /// Forces an immediate route refresh regardless of refresh interval.
+    /// Call this when the player enters a new zone or you want a new destination.
     /// </summary>
     public void ForceRouteRefresh()
     {
@@ -248,22 +225,23 @@ public class CentralizedCarController : MonoBehaviour
     }
 
     // =========================================================================
-    //  TEST FOLLOW PATH  (debug only — no Rigidbody writes)
+    //  TEST FOLLOW PATH  (Transform only — no Rigidbody writes)
     // =========================================================================
 
     /// <summary>
-    /// Moves the car along the current route using Transform directly.
-    /// This is KINEMATIC-STYLE movement — it does not write to any Rigidbody.
+    /// Moves the car along the current route using Transform.position directly.
     ///
-    /// Only active when followPath = true.
-    /// In production (followPath = false) this method is never called.
-    /// VehicleController.cs owns movement in production.
+    /// IMPORTANT: This is kinematic-style movement — it does NOT write to any
+    /// Rigidbody. It cannot interfere with VehicleController physics.
+    ///
+    /// Only active when followPath = true (default: false).
+    /// In production followPath should be false and VehicleController drives.
     /// </summary>
     private void TestFollowPath()
     {
         if (_waypointIndex >= _currentWaypoints.Count)
         {
-            // Reached end of route — request a new one
+            // End of route — clear and let RefreshRouteIfNeeded pick a new one
             _currentNodePath.Clear();
             navSystem.InvalidatePlayerPathCache();
             return;
@@ -273,14 +251,9 @@ public class CentralizedCarController : MonoBehaviour
         Vector3 toTarget  = target - transform.position;
         Vector3 toTargetXZ = new Vector3(toTarget.x, 0f, toTarget.z);
 
-        // Advance waypoint if close enough
         if (toTargetXZ.magnitude < testWaypointReachDistance)
-        {
-            _waypointIndex++;
-            return;
-        }
+        { _waypointIndex++; return; }
 
-        // Rotate toward target
         if (toTargetXZ.sqrMagnitude > 0.001f)
         {
             Quaternion targetRot = Quaternion.LookRotation(toTargetXZ.normalized);
@@ -288,7 +261,6 @@ public class CentralizedCarController : MonoBehaviour
                                                     testTurnSpeed * Time.deltaTime);
         }
 
-        // Move forward via Transform (no Rigidbody involvement)
         transform.position += transform.forward * testFollowSpeed * Time.deltaTime;
     }
 
@@ -298,8 +270,7 @@ public class CentralizedCarController : MonoBehaviour
 
     private int GetClosestNodeCached()
     {
-        // Re-query only on cache interval to avoid calling GetClosestNode every frame
-        if (_lastClosestNode == -1 || _closestNodeCacheTimer >= CLOSEST_NODE_CACHE_INTERVAL)
+        if (_lastClosestNode == -1 || _closestNodeCacheTimer >= CLOSEST_NODE_CACHE_HZ)
         {
             _closestNodeCacheTimer = 0f;
             _lastClosestNode = navSystem.GetClosestNode(transform.position);
@@ -308,97 +279,99 @@ public class CentralizedCarController : MonoBehaviour
     }
 
     // =========================================================================
-    //  BRAKE REACTION MEASUREMENT  (research data, read-only)
+    //  BRAKE REACTION MEASUREMENT
     // =========================================================================
 
     /// <summary>
-    /// Casts a forward ray to detect obstacles and measures how long before
-    /// the player reacts (brakes). Purely observational — does not affect movement.
+    /// Casts a forward ray to detect obstacles and measures the time between
+    /// the obstacle appearing and the player braking.
+    ///
+    /// Read-only research data — no movement impact whatsoever.
+    /// Speed is read from _rb.linearVelocity (never written).
+    /// Results feed into DashboardDataProvider and EnhancedDriverScoringSystem.
     /// </summary>
     private void MeasureBrakeReaction()
     {
-        Vector3 origin    = transform.position + Vector3.up * 0.5f;
-        bool    hitNow    = Physics.Raycast(origin, transform.forward, reactionRayDistance,
-                                            obstacleDetectionLayer);
+        Vector3 origin = transform.position + Vector3.up * 0.5f;
+        bool    hitNow = Physics.Raycast(origin, transform.forward,
+                                         reactionRayDistance, obstacleDetectionLayer);
 
-        if (hitNow && !_obstacleDetectedLastFrame)
+        if (hitNow && !_obstacleLastFrame)
         {
-            // Obstacle just appeared
+            // New obstacle appeared
             _obstacleFirstSeenTime = Time.time;
             _reactionFired         = false;
         }
-        else if (!hitNow && _obstacleDetectedLastFrame)
+        else if (!hitNow && _obstacleLastFrame)
         {
             // Obstacle cleared
             _obstacleFirstSeenTime = -1f;
             _reactionFired         = false;
         }
 
-        // Detect braking as significant deceleration
-        // We read velocity from Rigidbody here (read-only, no writes)
-        if (hitNow && !_reactionFired && _obstacleFirstSeenTime > 0f)
+        // Detect brake: car has slowed significantly while obstacle is present
+        // _rb is read-only — we never write velocity here
+        if (hitNow && !_reactionFired && _obstacleFirstSeenTime > 0f && _rb != null)
         {
-            Rigidbody rb = GetComponent<Rigidbody>();
-            if (rb != null)
+            float speed = new Vector2(_rb.linearVelocity.x, _rb.linearVelocity.z).magnitude;
+            if (speed < 0.5f)   // Effectively stopped
             {
-                float speed = new Vector2(rb.linearVelocity.x, rb.linearVelocity.z).magnitude;
-                if (speed < 0.5f) // Car has slowed significantly
-                {
-                    _lastReactionTime = Time.time - _obstacleFirstSeenTime;
-                    _reactionFired    = true;
+                _lastReactionTime  = Time.time - _obstacleFirstSeenTime;
+                _reactionFired     = true;
 
-                    // Accumulate for average / worst
-                    _reactionTimeSum  += _lastReactionTime;
-                    _reactionTimeCount++;
-                    if (_lastReactionTime > _worstReactionTime)
-                        _worstReactionTime = _lastReactionTime;
+                _reactionTimeSum  += _lastReactionTime;
+                _reactionTimeCount++;
+                if (_lastReactionTime > _worstReactionTime)
+                    _worstReactionTime = _lastReactionTime;
 
-                    Debug.Log($"[CarController] Brake reaction time: {_lastReactionTime * 1000f:F0} ms | " +
-                              $"Avg: {GetAverageReactionTime() * 1000f:F0} ms | " +
-                              $"Worst: {_worstReactionTime * 1000f:F0} ms");
-                }
+                Debug.Log($"[CarController] Brake reaction: {_lastReactionTime * 1000f:F0} ms  " +
+                          $"| Avg: {GetAverageReactionTime() * 1000f:F0} ms  " +
+                          $"| Worst: {_worstReactionTime * 1000f:F0} ms");
             }
         }
 
-        _obstacleDetectedLastFrame = hitNow;
+        _obstacleLastFrame = hitNow;
     }
 
     // =========================================================================
-    //  PUBLIC API
+    //  PUBLIC API  (used by DashboardDataProvider and EnhancedDriverScoringSystem)
     // =========================================================================
 
-    /// <summary>Last measured brake reaction time in seconds. -1 if not yet measured.</summary>
-    public float LastBrakeReactionTime => _lastReactionTime;
-
     /// <summary>
-    /// Average brake reaction time across all recorded events, in seconds.
-    /// Returns -1 if no reactions recorded yet.
-    /// Called by DashboardDataProvider.
+    /// Average brake reaction time across all recorded events in seconds.
+    /// Returns -1 if no events recorded yet.
+    /// Called by DashboardDataProvider.GetAvgReactionTimeSec().
     /// </summary>
     public float GetAverageReactionTime()
         => _reactionTimeCount > 0 ? _reactionTimeSum / _reactionTimeCount : -1f;
 
     /// <summary>
-    /// Worst (longest) brake reaction time recorded this session, in seconds.
-    /// Returns -1 if no reactions recorded yet.
-    /// Called by DashboardDataProvider.
+    /// Worst (longest) brake reaction time in seconds.
+    /// Returns -1 if no events recorded yet.
+    /// Called by DashboardDataProvider.GetWorstReactionTimeSec().
     /// </summary>
     public float GetWorstReactionTime()
         => _reactionTimeCount > 0 ? _worstReactionTime : -1f;
 
     /// <summary>
-    /// Resets all reaction time history. Called by DashboardDataProvider.ClearStoredData().
+    /// Resets all reaction time history.
+    /// Called by DashboardDataProvider.ClearStoredData().
     /// </summary>
     public void ClearReactionData()
     {
-        _reactionTimeSum          = 0f;
-        _reactionTimeCount        = 0;
-        _worstReactionTime        = -1f;
-        _lastReactionTime         = -1f;
-        _obstacleFirstSeenTime    = -1f;
-        _obstacleDetectedLastFrame = false;
-        _reactionFired            = false;
+        _reactionTimeSum       = 0f;
+        _reactionTimeCount     = 0;
+        _worstReactionTime     = -1f;
+        _lastReactionTime      = -1f;
+        _obstacleFirstSeenTime = -1f;
+        _obstacleLastFrame     = false;
+        _reactionFired         = false;
     }
+
+    // ── Read-only route info (for DashboardDataProvider + editor tools) ───────
+
+    /// <summary>Last measured brake reaction time in seconds. -1 if none yet.</summary>
+    public float LastBrakeReactionTime => _lastReactionTime;
 
     /// <summary>Current planned route node IDs.</summary>
     public List<int> CurrentNodePath => _currentNodePath;
@@ -406,25 +379,25 @@ public class CentralizedCarController : MonoBehaviour
     /// <summary>Current planned route dense waypoints.</summary>
     public List<Vector3> CurrentWaypoints => _currentWaypoints;
 
-    /// <summary>Source node ID of the current route.</summary>
+    /// <summary>Source node of the current route.</summary>
     public int CurrentSourceNode => _currentSourceNode;
 
-    /// <summary>Destination node ID of the current route.</summary>
+    /// <summary>Destination node of the current route.</summary>
     public int CurrentDestNode => _currentDestNode;
 
     // =========================================================================
-    //  GIZMOS  (editor only)
+    //  GIZMOS
     // =========================================================================
 
 #if UNITY_EDITOR
     private void OnDrawGizmosSelected()
     {
-        // Draw reaction ray
+        // Reaction ray
         Gizmos.color = Color.yellow;
         Gizmos.DrawRay(transform.position + Vector3.up * 0.5f,
                        transform.forward * reactionRayDistance);
 
-        // Draw current waypoint target
+        // Current waypoint target (test follow mode)
         if (_currentWaypoints != null && _waypointIndex < _currentWaypoints.Count)
         {
             Gizmos.color = Color.cyan;
