@@ -1,4 +1,18 @@
 ﻿#if UNITY_EDITOR
+// ============================================================================
+//  CENTRALIZED NAVIGATION SYSTEM EDITOR  v8.0
+//  ============================================================================
+//  PANELS (top to bottom):
+//    1. ⚡ Route Cache Baking    — Phase 1 + Phase 2 bake, status, stale check
+//    2. ✅ Connection Validator  — broken + duplicate detection / cleanup
+//    3. 🔍 Search Node           — per-node connection inspector
+//    4. 📋 All Connections       — scrollable full connection list
+//    5. 🏔️ Snap Nodes            — raycast-snap nodes to road surface
+//    6. 🚗 Node Creation         — quick-create buttons
+//    7. 🔧 Graph Tools           — auto-connect, demo, test path, debug
+//    8. Default Inspector        — all serialized fields
+// ============================================================================
+
 using UnityEngine;
 using UnityEditor;
 using System.Collections.Generic;
@@ -7,712 +21,509 @@ using System.Linq;
 [CustomEditor(typeof(CentralizedNavigationSystem))]
 public class CentralizedNavigationSystemEditor : Editor
 {
-    private int searchNodeID = 0;
-    private Vector2 connectionsScrollPosition;
-    private Vector2 allConnectionsScrollPosition;
-    private bool showNodeSearchPanel = true;
-    private bool showAllConnectionsPanel = false;
-    private List<ConnectionDefinition> connectionsToDelete = new List<ConnectionDefinition>();
+    // ── Foldout state ─────────────────────────────────────────────────────────
+    private bool _showBakePanel      = true;
+    private bool _showValidatorPanel = true;
+    private bool _showSearchPanel    = false;
+    private bool _showAllConnsPanel  = false;
+    private bool _showSnapPanel      = true;
 
+    // ── Search state ──────────────────────────────────────────────────────────
+    private int     _searchNodeID     = 0;
+    private Vector2 _searchScrollPos  = Vector2.zero;
+    private Vector2 _allConnsScrollPos = Vector2.zero;
+
+    // =========================================================================
     public override void OnInspectorGUI()
     {
-        CentralizedNavigationSystem nav = (CentralizedNavigationSystem)target;
+        var nav = (CentralizedNavigationSystem)target;
         serializedObject.Update();
 
-        // ========================================
-        // CONNECTION VALIDATOR (NEW)
-        // ========================================
-        GUILayout.Space(10);
-        DrawConnectionValidator(nav);
-
-        // ========================================
-        // NODE SEARCH & CONNECTION MANAGER
-        // ========================================
-        GUILayout.Space(10);
-        GUI.backgroundColor = new Color(0.7f, 0.9f, 1f);
-        showNodeSearchPanel = EditorGUILayout.BeginFoldoutHeaderGroup(showNodeSearchPanel, "🔍 SEARCH NODE CONNECTIONS");
-        GUI.backgroundColor = Color.white;
-
-        if (showNodeSearchPanel)
-        {
-            DrawNodeSearchPanel(nav);
-        }
-
-        EditorGUILayout.EndFoldoutHeaderGroup();
-
-        // ========================================
-        // ALL CONNECTIONS VIEWER
-        // ========================================
-        GUILayout.Space(10);
-        GUI.backgroundColor = new Color(1f, 0.9f, 0.7f);
-        showAllConnectionsPanel = EditorGUILayout.BeginFoldoutHeaderGroup(showAllConnectionsPanel, "📋 VIEW ALL CONNECTIONS");
-        GUI.backgroundColor = Color.white;
-
-        if (showAllConnectionsPanel)
-        {
-            DrawAllConnectionsPanel(nav);
-        }
-
-        EditorGUILayout.EndFoldoutHeaderGroup();
-
-        // ========================================
-        // SNAP NODES TO ROAD SURFACE
-        // ========================================
-        GUILayout.Space(10);
-        DrawSnapToRoadSection(nav);
-
-        // ========================================
-        // ORIGINAL BUTTONS
-        // ========================================
-        GUILayout.Space(10);
-        EditorGUILayout.LabelField("🚗 NODE CREATION", EditorStyles.boldLabel);
-
-        EditorGUILayout.BeginHorizontal();
-        if (GUILayout.Button("🆕 Next Node (SELECTED)", GUILayout.Height(35)))
-            nav.CreateNextNodeFromSelected();
-        GUILayout.Label("Select NavNode first!", GUILayout.Width(120));
-        EditorGUILayout.EndHorizontal();
-
-        if (GUILayout.Button("➡️ Forward (LAST NODE)", GUILayout.Height(35)))
-            nav.CreateNodeForward();
-
-        GUILayout.Space(10);
-        EditorGUILayout.LabelField("🔧 GRAPH TOOLS", EditorStyles.boldLabel);
-
-        EditorGUILayout.BeginHorizontal();
-        if (GUILayout.Button("🔗 Auto Connect", GUILayout.Height(30))) nav.AutoConnectNodes();
-        if (GUILayout.Button("🧹 Clear", GUILayout.Height(30))) nav.ClearAllConnections();
-        EditorGUILayout.EndHorizontal();
-
-        if (GUILayout.Button("🎮 Setup Demo (5 nodes)", GUILayout.Height(30)))
-            nav.SetupDemo();
-
-        GUILayout.Space(5);
-        if (GUILayout.Button("🎯 Test Path", GUILayout.Height(25)))
-            nav.TestPathZeroToLast();
-
-        // ========================================
-        // DEFAULT INSPECTOR
-        // ========================================
-        GUILayout.Space(10);
+        DrawBakePanel(nav);
+        Space(6);
+        DrawValidatorPanel(nav);
+        Space(6);
+        DrawSearchPanel(nav);
+        Space(6);
+        DrawAllConnectionsPanel(nav);
+        Space(6);
+        DrawSnapPanel(nav);
+        Space(6);
+        DrawNodeCreationButtons(nav);
+        Space(6);
+        DrawGraphToolButtons(nav);
+        Space(10);
         DrawDefaultInspector();
 
         serializedObject.ApplyModifiedProperties();
     }
 
-    // ========================================
-    // CONNECTION VALIDATOR & CLEANER
-    // ========================================
-    private void DrawConnectionValidator(CentralizedNavigationSystem nav)
-    {
-        GUIStyle boxStyle = new GUIStyle(GUI.skin.box);
-        boxStyle.padding = new RectOffset(10, 10, 10, 10);
+    // =========================================================================
+    //  1. ROUTE CACHE BAKING PANEL
+    // =========================================================================
 
-        // Find broken connections
-        List<ConnectionDefinition> brokenConnections = new List<ConnectionDefinition>();
-        List<ConnectionDefinition> duplicateConnections = new List<ConnectionDefinition>();
-        
-        foreach (var conn in nav.connectionDefinitions)
+    private void DrawBakePanel(CentralizedNavigationSystem nav)
+    {
+        GUI.backgroundColor = new Color(0.45f, 0.9f, 0.45f);
+        _showBakePanel = EditorGUILayout.BeginFoldoutHeaderGroup(_showBakePanel, "⚡  ROUTE CACHE BAKING  (Phase 1 + Phase 2)");
+        GUI.backgroundColor = Color.white;
+
+        if (!_showBakePanel) { EditorGUILayout.EndFoldoutHeaderGroup(); return; }
+
+        EditorGUILayout.BeginVertical(Box());
+
+        // ── Info ──────────────────────────────────────────────────────────────
+        EditorGUILayout.HelpBox(
+            "Bakes the full navigation cache in the editor — once.\n\n" +
+            "Phase 1 — NavMesh.CalculatePath() for every connected node pair\n" +
+            "          → dense road-surface waypoints saved to asset\n\n" +
+            "Phase 2 — A* + segment stitch for every source node\n" +
+            "          → complete NPC routes saved to asset\n\n" +
+            "At runtime both caches load in ~10ms → NPCs spawn immediately.\n" +
+            "Edge-case pool misses are handled by live compute + auto-cache.\n\n" +
+            "SETUP:\n" +
+            "  1. Assets → Create → Navigation → Nav Route Cache Asset\n" +
+            "  2. Assign .asset to 'Route Cache Asset' below\n" +
+            "  3. Bake scene NavMesh  (Window → AI → Navigation → Bake)\n" +
+            "  4. Press 'Bake & Save Full Route Cache'\n" +
+            "  5. Press Play — NPCs spawn with zero delay\n\n" +
+            "RE-BAKE WHEN:\n" +
+            "  • NavMesh rebuilt (road geometry changed)\n" +
+            "  • Major graph changes (30%+ connections changed)\n" +
+            "  • maxWaypointSpacing / heightOffset / routesPerNode changed\n\n" +
+            "NOT needed for:\n" +
+            "  • NPC speed / detection / spawn count changes\n" +
+            "  • Minor node moves or adding a few connections",
+            MessageType.Info);
+
+        Space(5);
+
+        // ── Asset status ──────────────────────────────────────────────────────
+        NavRouteCacheAsset asset = nav.routeCacheAsset;
+
+        if (asset == null)
         {
-            // Check if nodes exist
-            bool fromExists = nav.nodeMap.ContainsKey(conn.fromNodeID);
-            bool toExists = nav.nodeMap.ContainsKey(conn.toNodeID);
-            
-            if (!fromExists || !toExists)
-            {
-                brokenConnections.Add(conn);
-            }
+            GUI.backgroundColor = new Color(1f, 0.85f, 0.35f, 0.4f);
+            EditorGUILayout.BeginVertical(GUI.skin.box);
+            EditorGUILayout.LabelField("⚠️  No cache asset assigned", Bold());
+            EditorGUILayout.LabelField(
+                "Create: Assets → Create → Navigation → Nav Route Cache Asset",
+                EditorStyles.miniLabel);
+            EditorGUILayout.EndVertical();
+            GUI.backgroundColor = Color.white;
+        }
+        else
+        {
+            DrawCacheStatusBox(nav, asset);
         }
 
-        // Find duplicates (A->B and B->A when both are bidirectional)
+        Space(8);
+
+        // ── Bake button ───────────────────────────────────────────────────────
+        bool isBaking = CentralizedNavigationSystem.IsBakeRunning;
+        bool canBake  = asset != null && nav.nodes.Count >= 2 && !isBaking;
+        GUI.enabled = canBake;
+
+        if (isBaking)
+        {
+            GUI.backgroundColor = new Color(1f, 0.75f, 0f);
+            GUILayout.Button("⏳  Baking in progress — check progress bar above...", BigBtn(52));
+            GUI.backgroundColor = Color.white;
+            // Force inspector to repaint so the label stays live
+            EditorUtility.SetDirty(nav);
+        }
+        else
+        {
+            GUI.backgroundColor = new Color(0.1f, 0.82f, 0.1f);
+            if (GUILayout.Button("⚡  Bake & Save Full Route Cache  (Phase 1 + Phase 2)", BigBtn(52)))
+                nav.EditorBakeFullCache();
+            GUI.backgroundColor = Color.white;
+        }
+
+        GUI.enabled = true;
+
+        if (!canBake)
+        {
+            if (asset == null)
+                EditorGUILayout.HelpBox("Assign a NavRouteCacheAsset to enable baking.", MessageType.Warning);
+            else
+                EditorGUILayout.HelpBox("Need at least 2 nodes.", MessageType.Warning);
+        }
+
+        // ── Clear button ──────────────────────────────────────────────────────
+        if (asset != null && asset.isValid)
+        {
+            Space(3);
+            GUI.backgroundColor = new Color(1f, 0.38f, 0.38f);
+            if (GUILayout.Button("🗑️  Clear Cache  (mark invalid — does not delete .asset file)", GUILayout.Height(26)))
+            {
+                if (EditorUtility.DisplayDialog("Clear Route Cache",
+                    "Mark the cache as invalid?\n\n" +
+                    "NPCs will fall back to runtime baking until you re-bake.\n" +
+                    "The .asset file is NOT deleted.",
+                    "Clear", "Cancel"))
+                    nav.EditorClearCache();
+            }
+            GUI.backgroundColor = Color.white;
+        }
+
+        EditorGUILayout.EndVertical();
+        EditorGUILayout.EndFoldoutHeaderGroup();
+    }
+
+    private void DrawCacheStatusBox(CentralizedNavigationSystem nav, NavRouteCacheAsset asset)
+    {
+        bool valid = asset.isValid;
+
+        // Check for stale state
+        string staleWarning = valid ? asset.GetStaleWarning(
+            nav.nodes.Count,
+            nav.connectionDefinitions.Count,
+            nav.maxWaypointSpacing,
+            nav.waypointHeightOffset,
+            nav.routesPerSourceNode) : "";
+
+        bool isStale = !string.IsNullOrEmpty(staleWarning);
+
+        // Status color
+        if (!valid)         GUI.backgroundColor = new Color(1f, 0.35f, 0.25f, 0.3f);
+        else if (isStale)   GUI.backgroundColor = new Color(1f, 0.85f, 0.25f, 0.3f);
+        else                GUI.backgroundColor = new Color(0.2f, 1f, 0.2f, 0.25f);
+
+        EditorGUILayout.BeginVertical(GUI.skin.box);
+
+        // Header label
+        var hdr = new GUIStyle(EditorStyles.boldLabel) { fontSize = 12 };
+        if (!valid)       hdr.normal.textColor = new Color(0.85f, 0.15f, 0.1f);
+        else if (isStale) hdr.normal.textColor = new Color(0.75f, 0.55f, 0.05f);
+        else              hdr.normal.textColor = new Color(0.05f, 0.65f, 0.05f);
+
+        EditorGUILayout.LabelField(
+            !valid      ? "⚠️  NOT BAKED YET" :
+            isStale     ? "⚠️  CACHE MAY BE STALE" :
+                          "✅  CACHE VALID",
+            hdr);
+
+        if (valid)
+        {
+            Space(3);
+            EditorGUILayout.LabelField($"   Scene:        {asset.sceneName}");
+            EditorGUILayout.LabelField($"   Nodes:        {asset.nodeCount}");
+            EditorGUILayout.LabelField($"   Connections:  {asset.connectionCount}");
+            EditorGUILayout.LabelField($"   Segments:     {asset.segmentCount}");
+            EditorGUILayout.LabelField($"   Routes:       {asset.routeCount}  ({asset.routesPerNode} per node)");
+            EditorGUILayout.LabelField($"   Baked at:     {asset.bakedAt}");
+
+            // Estimated asset size
+            float estimatedMB = (asset.segmentCount * 360f + asset.routeCount * 1800f) / (1024f * 1024f);
+            EditorGUILayout.LabelField($"   Est. size:    ~{estimatedMB:F1} MB in memory");
+        }
+
+        // Stale details
+        if (isStale)
+        {
+            Space(3);
+            GUI.backgroundColor = new Color(1f, 0.9f, 0.4f, 0.4f);
+            EditorGUILayout.BeginVertical(GUI.skin.box);
+            EditorGUILayout.LabelField("Changes since last bake:", EditorStyles.boldLabel);
+            foreach (var line in staleWarning.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)))
+                EditorGUILayout.LabelField("  " + line.Trim(), EditorStyles.miniLabel);
+            EditorGUILayout.LabelField(
+                "Edge cases will use live computation. Re-bake for full performance.",
+                EditorStyles.miniLabel);
+            EditorGUILayout.EndVertical();
+            GUI.backgroundColor = Color.white;
+        }
+
+        EditorGUILayout.EndVertical();
+        GUI.backgroundColor = Color.white;
+    }
+
+    // =========================================================================
+    //  2. CONNECTION VALIDATOR
+    // =========================================================================
+
+    private void DrawValidatorPanel(CentralizedNavigationSystem nav)
+    {
+        var broken     = new List<ConnectionDefinition>();
+        var duplicates = new List<ConnectionDefinition>();
+
+        foreach (var c in nav.connectionDefinitions)
+            if (!nav.nodeMap.ContainsKey(c.fromNodeID) || !nav.nodeMap.ContainsKey(c.toNodeID))
+                broken.Add(c);
+
         for (int i = 0; i < nav.connectionDefinitions.Count; i++)
         {
-            var conn1 = nav.connectionDefinitions[i];
+            var a = nav.connectionDefinitions[i];
             for (int j = i + 1; j < nav.connectionDefinitions.Count; j++)
             {
-                var conn2 = nav.connectionDefinitions[j];
-                
-                // Check for exact duplicates or reversed duplicates
-                if ((conn1.fromNodeID == conn2.fromNodeID && conn1.toNodeID == conn2.toNodeID) ||
-                    (conn1.fromNodeID == conn2.toNodeID && conn1.toNodeID == conn2.fromNodeID))
-                {
-                    if (!duplicateConnections.Contains(conn2))
-                        duplicateConnections.Add(conn2);
-                }
+                var b = nav.connectionDefinitions[j];
+                if ((a.fromNodeID == b.fromNodeID && a.toNodeID == b.toNodeID) ||
+                    (a.fromNodeID == b.toNodeID   && a.toNodeID == b.fromNodeID))
+                    if (!duplicates.Contains(b)) duplicates.Add(b);
             }
         }
 
-        bool hasIssues = brokenConnections.Count > 0 || duplicateConnections.Count > 0;
+        bool issues = broken.Count > 0 || duplicates.Count > 0;
 
-        if (hasIssues)
-        {
-            GUI.backgroundColor = new Color(1f, 0.3f, 0.3f, 0.3f);
-        }
-        else
-        {
-            GUI.backgroundColor = new Color(0.3f, 1f, 0.3f, 0.3f);
-        }
+        GUI.backgroundColor = issues
+            ? new Color(1f, 0.25f, 0.25f, 0.25f)
+            : new Color(0.25f, 1f, 0.25f, 0.25f);
 
-        EditorGUILayout.BeginVertical(boxStyle);
+        EditorGUILayout.BeginVertical(Box());
 
-        GUIStyle headerStyle = new GUIStyle(EditorStyles.boldLabel);
-        headerStyle.fontSize = 12;
-        
-        if (hasIssues)
-        {
-            headerStyle.normal.textColor = Color.red;
-            EditorGUILayout.LabelField("⚠️ CONNECTION VALIDATOR - ISSUES FOUND!", headerStyle);
-        }
-        else
-        {
-            headerStyle.normal.textColor = Color.green;
-            EditorGUILayout.LabelField("✅ CONNECTION VALIDATOR - ALL GOOD", headerStyle);
-        }
+        var hdr = new GUIStyle(EditorStyles.boldLabel) { fontSize = 12 };
+        hdr.normal.textColor = issues ? Color.red : new Color(0.05f, 0.65f, 0.05f);
+        EditorGUILayout.LabelField(
+            issues ? "⚠️  CONNECTION VALIDATOR — ISSUES FOUND"
+                   : "✅  CONNECTION VALIDATOR — ALL GOOD", hdr);
 
-        GUILayout.Space(5);
-
+        Space(3);
         EditorGUILayout.BeginHorizontal();
-        EditorGUILayout.LabelField($"Total Connections: {nav.connectionDefinitions.Count}", EditorStyles.miniLabel);
+        EditorGUILayout.LabelField($"Connections: {nav.connectionDefinitions.Count}", EditorStyles.miniLabel);
         EditorGUILayout.LabelField($"Valid Nodes: {nav.nodeMap.Count}", EditorStyles.miniLabel);
         EditorGUILayout.EndHorizontal();
 
-        if (brokenConnections.Count > 0)
+        if (broken.Count > 0)
         {
-            GUILayout.Space(5);
-            GUI.backgroundColor = new Color(1f, 0.5f, 0.5f);
+            Space(4);
+            GUI.backgroundColor = new Color(1f, 0.45f, 0.45f, 0.5f);
             EditorGUILayout.BeginVertical(GUI.skin.box);
-            EditorGUILayout.LabelField($"❌ BROKEN CONNECTIONS: {brokenConnections.Count}", EditorStyles.boldLabel);
-            
-            foreach (var conn in brokenConnections.Take(5)) // Show first 5
+            EditorGUILayout.LabelField($"❌  Broken Connections: {broken.Count}", Bold());
+            foreach (var c in broken.Take(5))
             {
-                bool fromExists = nav.nodeMap.ContainsKey(conn.fromNodeID);
-                bool toExists = nav.nodeMap.ContainsKey(conn.toNodeID);
-                
-                string fromStatus = fromExists ? $"✓ {conn.fromNodeID}" : $"❌ {conn.fromNodeID} (MISSING)";
-                string toStatus = toExists ? $"✓ {conn.toNodeID}" : $"❌ {conn.toNodeID} (MISSING)";
-                string arrow = conn.bidirectional ? "⟷" : "→";
-                
-                EditorGUILayout.LabelField($"  {fromStatus} {arrow} {toStatus}", EditorStyles.miniLabel);
+                string f = nav.nodeMap.ContainsKey(c.fromNodeID) ? $"✓{c.fromNodeID}" : $"❌{c.fromNodeID}(MISSING)";
+                string t = nav.nodeMap.ContainsKey(c.toNodeID)   ? $"✓{c.toNodeID}"   : $"❌{c.toNodeID}(MISSING)";
+                EditorGUILayout.LabelField($"  {f}  {(c.bidirectional ? "⟷" : "→")}  {t}", EditorStyles.miniLabel);
             }
-            
-            if (brokenConnections.Count > 5)
-            {
-                EditorGUILayout.LabelField($"  ... and {brokenConnections.Count - 5} more", EditorStyles.miniLabel);
-            }
-            
+            if (broken.Count > 5) EditorGUILayout.LabelField($"  …and {broken.Count - 5} more", EditorStyles.miniLabel);
             EditorGUILayout.EndVertical();
             GUI.backgroundColor = Color.white;
 
-            GUILayout.Space(5);
-            GUI.backgroundColor = new Color(1f, 0.3f, 0.3f);
-            if (GUILayout.Button($"🗑️ DELETE {brokenConnections.Count} BROKEN CONNECTIONS", GUILayout.Height(30)))
-            {
-                if (EditorUtility.DisplayDialog(
-                    "Delete Broken Connections",
-                    $"This will delete {brokenConnections.Count} connections that reference non-existent nodes.\n\nContinue?",
-                    "Yes, Delete",
-                    "Cancel"))
+            GUI.backgroundColor = new Color(1f, 0.25f, 0.25f);
+            if (GUILayout.Button($"🗑️  Delete {broken.Count} Broken Connections", GUILayout.Height(28)))
+                if (EditorUtility.DisplayDialog("Delete Broken Connections",
+                    $"Delete {broken.Count} connections with missing nodes?", "Delete", "Cancel"))
                 {
                     Undo.RecordObject(nav, "Delete Broken Connections");
-                    foreach (var conn in brokenConnections)
-                    {
-                        nav.connectionDefinitions.Remove(conn);
-                    }
-                    nav.RefreshGraph();
-                    EditorUtility.SetDirty(nav);
-                    Debug.Log($"[NavSystem] Deleted {brokenConnections.Count} broken connections");
+                    foreach (var c in broken) nav.connectionDefinitions.Remove(c);
+                    nav.RefreshGraph(); EditorUtility.SetDirty(nav);
                 }
-            }
             GUI.backgroundColor = Color.white;
         }
 
-        if (duplicateConnections.Count > 0)
+        if (duplicates.Count > 0)
         {
-            GUILayout.Space(5);
-            GUI.backgroundColor = new Color(1f, 0.9f, 0.5f);
+            Space(4);
+            GUI.backgroundColor = new Color(1f, 0.9f, 0.45f, 0.5f);
             EditorGUILayout.BeginVertical(GUI.skin.box);
-            EditorGUILayout.LabelField($"⚠️ DUPLICATE CONNECTIONS: {duplicateConnections.Count}", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("  (Same connection defined multiple times)", EditorStyles.miniLabel);
+            EditorGUILayout.LabelField($"⚠️  Duplicate Connections: {duplicates.Count}", Bold());
             EditorGUILayout.EndVertical();
             GUI.backgroundColor = Color.white;
 
-            GUILayout.Space(5);
-            GUI.backgroundColor = new Color(1f, 0.7f, 0.3f);
-            if (GUILayout.Button($"🧹 REMOVE {duplicateConnections.Count} DUPLICATES", GUILayout.Height(30)))
+            GUI.backgroundColor = new Color(1f, 0.72f, 0.25f);
+            if (GUILayout.Button($"🧹  Remove {duplicates.Count} Duplicates", GUILayout.Height(28)))
             {
-                Undo.RecordObject(nav, "Remove Duplicate Connections");
-                foreach (var conn in duplicateConnections)
-                {
-                    nav.connectionDefinitions.Remove(conn);
-                }
-                nav.RefreshGraph();
-                EditorUtility.SetDirty(nav);
-                Debug.Log($"[NavSystem] Removed {duplicateConnections.Count} duplicate connections");
+                Undo.RecordObject(nav, "Remove Duplicates");
+                foreach (var c in duplicates) nav.connectionDefinitions.Remove(c);
+                nav.RefreshGraph(); EditorUtility.SetDirty(nav);
             }
             GUI.backgroundColor = Color.white;
         }
 
-        GUILayout.Space(5);
-
+        Space(4);
         EditorGUILayout.BeginHorizontal();
-        
-        if (GUILayout.Button("🔍 VALIDATE & REBUILD GRAPH", GUILayout.Height(25)))
-        {
-            Undo.RecordObject(nav, "Validate Graph");
-            nav.ValidateAndRebuildGraph();
-            EditorUtility.SetDirty(nav);
-            Debug.Log("[NavSystem] Graph validated and rebuilt");
-        }
-
-        if (GUILayout.Button("📊 DEBUG PRINT CONNECTIONS", GUILayout.Height(25)))
-        {
+        if (GUILayout.Button("🔍 Validate & Rebuild", GUILayout.Height(24)))
+        { Undo.RecordObject(nav, "Validate Graph"); nav.ValidateAndRebuildGraph(); EditorUtility.SetDirty(nav); }
+        if (GUILayout.Button("📊 Print Connections", GUILayout.Height(24)))
             nav.DebugPrintAllConnections();
-        }
-
         EditorGUILayout.EndHorizontal();
 
         EditorGUILayout.EndVertical();
         GUI.backgroundColor = Color.white;
     }
 
-    // ========================================
-    // NODE SEARCH PANEL
-    // ========================================
-    private void DrawNodeSearchPanel(CentralizedNavigationSystem nav)
+    // =========================================================================
+    //  3. NODE SEARCH PANEL
+    // =========================================================================
+
+    private void DrawSearchPanel(CentralizedNavigationSystem nav)
     {
-        GUIStyle boxStyle = new GUIStyle(GUI.skin.box);
-        boxStyle.padding = new RectOffset(10, 10, 10, 10);
+        GUI.backgroundColor = new Color(0.65f, 0.88f, 1f);
+        _showSearchPanel = EditorGUILayout.BeginFoldoutHeaderGroup(_showSearchPanel, "🔍  SEARCH NODE CONNECTIONS");
+        GUI.backgroundColor = Color.white;
 
-        EditorGUILayout.BeginVertical(boxStyle);
+        if (!_showSearchPanel) { EditorGUILayout.EndFoldoutHeaderGroup(); return; }
 
-        // Search input
+        EditorGUILayout.BeginVertical(Box());
+
         EditorGUILayout.BeginHorizontal();
-        EditorGUILayout.LabelField("Search Node ID:", GUILayout.Width(100));
-        searchNodeID = EditorGUILayout.IntField(searchNodeID, GUILayout.Width(80));
-
-        if (GUILayout.Button("🔍 Search", GUILayout.Width(80)))
-        {
-            // Force refresh
-            Repaint();
-        }
-
-        if (GUILayout.Button("🎯 Focus Node", GUILayout.Width(100)))
-        {
-            FocusOnNode(nav, searchNodeID);
-        }
-
+        EditorGUILayout.LabelField("Node ID:", GUILayout.Width(55));
+        _searchNodeID = EditorGUILayout.IntField(_searchNodeID, GUILayout.Width(70));
+        if (GUILayout.Button("🔍", GUILayout.Width(30))) Repaint();
+        if (GUILayout.Button("🎯 Focus", GUILayout.Width(70))) FocusNode(nav, _searchNodeID);
         EditorGUILayout.EndHorizontal();
+        Space(5);
 
-        GUILayout.Space(5);
-
-        // Check if node exists
-        bool nodeExists = nav.nodeMap.ContainsKey(searchNodeID);
-
-        if (!nodeExists)
+        if (!nav.nodeMap.ContainsKey(_searchNodeID))
         {
-            EditorGUILayout.HelpBox($"❌ Node ID {searchNodeID} does not exist!", MessageType.Warning);
+            EditorGUILayout.HelpBox($"Node {_searchNodeID} not found.", MessageType.Warning);
         }
         else
         {
-            NavNode node = nav.nodeMap[searchNodeID];
-
-            // Node info
-            GUI.backgroundColor = new Color(0.5f, 1f, 0.5f, 0.3f);
+            var node = nav.nodeMap[_searchNodeID];
+            GUI.backgroundColor = new Color(0.35f, 1f, 0.35f, 0.18f);
             EditorGUILayout.BeginVertical(GUI.skin.box);
-            EditorGUILayout.LabelField($"✅ Node ID {searchNodeID} Found", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField($"Name: {node.name}");
+            EditorGUILayout.LabelField($"✅  Node {_searchNodeID}  —  {node.name}", Bold());
             EditorGUILayout.LabelField($"Position: {node.transform.position}");
             EditorGUILayout.EndVertical();
             GUI.backgroundColor = Color.white;
+            Space(6);
 
-            GUILayout.Space(10);
+            var outgoing = nav.connectionDefinitions.Where(c => c.fromNodeID == _searchNodeID).ToList();
+            var incoming = nav.connectionDefinitions.Where(c => c.toNodeID   == _searchNodeID).ToList();
+            int total    = outgoing.Count + incoming.Count;
 
-            // Find all connections for this node
-            List<ConnectionDefinition> outgoingConnections = new List<ConnectionDefinition>();
-            List<ConnectionDefinition> incomingConnections = new List<ConnectionDefinition>();
+            EditorGUILayout.LabelField($"🔗 Total: {total}  (→ {outgoing.Count}  ← {incoming.Count})", Bold());
+            Space(3);
 
-            foreach (var conn in nav.connectionDefinitions)
-            {
-                if (conn.fromNodeID == searchNodeID)
-                {
-                    outgoingConnections.Add(conn);
-                }
-                if (conn.toNodeID == searchNodeID)
-                {
-                    incomingConnections.Add(conn);
-                }
-            }
-
-            int totalConnections = outgoingConnections.Count + incomingConnections.Count;
-
-            // Connection summary
-            EditorGUILayout.LabelField($"🔗 Total Connections: {totalConnections}", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField($"   ➡️ Outgoing: {outgoingConnections.Count}");
-            EditorGUILayout.LabelField($"   ⬅️ Incoming: {incomingConnections.Count}");
-
-            GUILayout.Space(5);
-
-            // Scrollable connections list
-            connectionsScrollPosition = EditorGUILayout.BeginScrollView(connectionsScrollPosition, GUILayout.MaxHeight(300));
-
-            // OUTGOING CONNECTIONS
-            if (outgoingConnections.Count > 0)
-            {
-                EditorGUILayout.LabelField("➡️ OUTGOING CONNECTIONS", EditorStyles.boldLabel);
-                GUILayout.Space(3);
-
-                foreach (var conn in outgoingConnections)
-                {
-                    DrawConnectionRow(nav, conn, searchNodeID, true);
-                }
-
-                GUILayout.Space(10);
-            }
-
-            // INCOMING CONNECTIONS
-            if (incomingConnections.Count > 0)
-            {
-                EditorGUILayout.LabelField("⬅️ INCOMING CONNECTIONS", EditorStyles.boldLabel);
-                GUILayout.Space(3);
-
-                foreach (var conn in incomingConnections)
-                {
-                    DrawConnectionRow(nav, conn, searchNodeID, false);
-                }
-            }
-
-            if (totalConnections == 0)
-            {
-                EditorGUILayout.HelpBox("This node has no connections.", MessageType.Info);
-            }
-
+            _searchScrollPos = EditorGUILayout.BeginScrollView(_searchScrollPos, GUILayout.MaxHeight(270));
+            if (outgoing.Count > 0)
+            { EditorGUILayout.LabelField("➡️ OUTGOING", Bold()); Space(2);
+              foreach (var c in outgoing) DrawConnRow(nav, c, _searchNodeID, true); Space(6); }
+            if (incoming.Count > 0)
+            { EditorGUILayout.LabelField("⬅️ INCOMING", Bold()); Space(2);
+              foreach (var c in incoming) DrawConnRow(nav, c, _searchNodeID, false); }
+            if (total == 0) EditorGUILayout.HelpBox("No connections.", MessageType.Info);
             EditorGUILayout.EndScrollView();
 
-            // Bulk actions
-            if (totalConnections > 0)
+            if (total > 0)
             {
-                GUILayout.Space(10);
-                GUI.backgroundColor = new Color(1f, 0.5f, 0.5f);
-                if (GUILayout.Button($"🗑️ DELETE ALL CONNECTIONS FOR NODE {searchNodeID}", GUILayout.Height(35)))
-                {
-                    if (EditorUtility.DisplayDialog(
-                        "Delete All Connections",
-                        $"Are you sure you want to delete all {totalConnections} connections for Node {searchNodeID}?",
-                        "Yes, Delete All",
-                        "Cancel"))
-                    {
-                        DeleteAllConnectionsForNode(nav, searchNodeID);
-                    }
-                }
+                Space(6);
+                GUI.backgroundColor = new Color(1f, 0.35f, 0.35f);
+                if (GUILayout.Button($"🗑️  Delete ALL {total} connections for Node {_searchNodeID}", GUILayout.Height(34)))
+                    if (EditorUtility.DisplayDialog("Delete All Connections",
+                        $"Delete all {total} connections for Node {_searchNodeID}?", "Delete", "Cancel"))
+                        DeleteAllForNode(nav, _searchNodeID);
                 GUI.backgroundColor = Color.white;
             }
         }
 
         EditorGUILayout.EndVertical();
+        EditorGUILayout.EndFoldoutHeaderGroup();
     }
 
-    // ========================================
-    // DRAW CONNECTION ROW
-    // ========================================
-    private void DrawConnectionRow(CentralizedNavigationSystem nav, ConnectionDefinition conn, int currentNodeID, bool isOutgoing)
-    {
-        GUIStyle rowStyle = new GUIStyle(GUI.skin.box);
-        rowStyle.padding = new RectOffset(5, 5, 5, 5);
+    // =========================================================================
+    //  4. ALL CONNECTIONS PANEL
+    // =========================================================================
 
-        Color bgColor = conn.bidirectional ? new Color(0.5f, 1f, 0.5f, 0.2f) : new Color(1f, 0.7f, 0.5f, 0.2f);
-        GUI.backgroundColor = bgColor;
-
-        EditorGUILayout.BeginVertical(rowStyle);
-        EditorGUILayout.BeginHorizontal();
-
-        // Connection info
-        int otherNodeID = isOutgoing ? conn.toNodeID : conn.fromNodeID;
-        string otherNodeName = nav.nodeMap.ContainsKey(otherNodeID) ? nav.nodeMap[otherNodeID].name : "INVALID";
-
-        string arrow = conn.bidirectional ? "⟷" : (isOutgoing ? "→" : "←");
-        string direction = conn.bidirectional ? "Bidirectional" : "One-way";
-
-        EditorGUILayout.LabelField($"{arrow}", GUILayout.Width(30));
-        EditorGUILayout.LabelField($"Node {otherNodeID}", GUILayout.Width(70));
-        EditorGUILayout.LabelField($"({otherNodeName})", GUILayout.Width(120));
-        EditorGUILayout.LabelField($"[{direction}]", GUILayout.Width(100));
-
-        GUILayout.FlexibleSpace();
-
-        // Focus button
-        if (GUILayout.Button("👁️", GUILayout.Width(30), GUILayout.Height(20)))
-        {
-            FocusOnNode(nav, otherNodeID);
-        }
-
-        // Delete button
-        GUI.backgroundColor = new Color(1f, 0.3f, 0.3f);
-        if (GUILayout.Button("🗑️", GUILayout.Width(30), GUILayout.Height(20)))
-        {
-            if (EditorUtility.DisplayDialog(
-                "Delete Connection",
-                $"Delete connection: {conn.fromNodeID} → {conn.toNodeID} ({direction})?",
-                "Delete",
-                "Cancel"))
-            {
-                DeleteConnection(nav, conn);
-            }
-        }
-        GUI.backgroundColor = Color.white;
-
-        EditorGUILayout.EndHorizontal();
-        EditorGUILayout.EndVertical();
-
-        GUI.backgroundColor = Color.white;
-        GUILayout.Space(2);
-    }
-
-    // ========================================
-    // ALL CONNECTIONS PANEL
-    // ========================================
     private void DrawAllConnectionsPanel(CentralizedNavigationSystem nav)
     {
-        GUIStyle boxStyle = new GUIStyle(GUI.skin.box);
-        boxStyle.padding = new RectOffset(10, 10, 10, 10);
+        GUI.backgroundColor = new Color(1f, 0.92f, 0.65f);
+        _showAllConnsPanel = EditorGUILayout.BeginFoldoutHeaderGroup(_showAllConnsPanel, "📋  VIEW ALL CONNECTIONS");
+        GUI.backgroundColor = Color.white;
 
-        EditorGUILayout.BeginVertical(boxStyle);
+        if (!_showAllConnsPanel) { EditorGUILayout.EndFoldoutHeaderGroup(); return; }
 
-        EditorGUILayout.LabelField($"Total Connections: {nav.connectionDefinitions.Count}", EditorStyles.boldLabel);
-        GUILayout.Space(5);
+        EditorGUILayout.BeginVertical(Box());
+        EditorGUILayout.LabelField($"Total: {nav.connectionDefinitions.Count}", Bold());
+        Space(4);
 
         if (nav.connectionDefinitions.Count == 0)
-        {
-            EditorGUILayout.HelpBox("No connections exist.", MessageType.Info);
-        }
+        { EditorGUILayout.HelpBox("No connections.", MessageType.Info); }
         else
         {
-            allConnectionsScrollPosition = EditorGUILayout.BeginScrollView(allConnectionsScrollPosition, GUILayout.MaxHeight(400));
+            _allConnsScrollPos = EditorGUILayout.BeginScrollView(_allConnsScrollPos, GUILayout.MaxHeight(360));
 
             for (int i = 0; i < nav.connectionDefinitions.Count; i++)
             {
-                var conn = nav.connectionDefinitions[i];
+                var c     = nav.connectionDefinitions[i];
+                bool fOk  = nav.nodeMap.ContainsKey(c.fromNodeID);
+                bool tOk  = nav.nodeMap.ContainsKey(c.toNodeID);
+                string fn = fOk ? nav.nodeMap[c.fromNodeID].name : "MISSING";
+                string tn = tOk ? nav.nodeMap[c.toNodeID].name   : "MISSING";
 
-                GUIStyle connStyle = new GUIStyle(GUI.skin.box);
-                connStyle.padding = new RectOffset(5, 5, 5, 5);
+                GUI.backgroundColor = c.bidirectional
+                    ? new Color(0.35f, 1f, 0.35f, 0.12f)
+                    : new Color(1f, 0.72f, 0.35f, 0.12f);
 
-                Color bgColor = conn.bidirectional ? new Color(0.5f, 1f, 0.5f, 0.2f) : new Color(1f, 0.7f, 0.5f, 0.2f);
-                GUI.backgroundColor = bgColor;
-
-                EditorGUILayout.BeginVertical(connStyle);
+                EditorGUILayout.BeginVertical(GUI.skin.box);
                 EditorGUILayout.BeginHorizontal();
-
-                // Validate nodes
-                bool fromExists = nav.nodeMap.ContainsKey(conn.fromNodeID);
-                bool toExists = nav.nodeMap.ContainsKey(conn.toNodeID);
-                bool isValid = fromExists && toExists;
-
-                string fromName = fromExists ? nav.nodeMap[conn.fromNodeID].name : "INVALID";
-                string toName = toExists ? nav.nodeMap[conn.toNodeID].name : "INVALID";
-
-                string status = isValid ? "✓" : "❌";
-                string arrow = conn.bidirectional ? "⟷" : "→";
-
-                EditorGUILayout.LabelField($"{status}", GUILayout.Width(20));
-                EditorGUILayout.LabelField($"{conn.fromNodeID}", GUILayout.Width(30));
-                EditorGUILayout.LabelField($"({fromName})", GUILayout.Width(100));
-                EditorGUILayout.LabelField($"{arrow}", GUILayout.Width(30));
-                EditorGUILayout.LabelField($"{conn.toNodeID}", GUILayout.Width(30));
-                EditorGUILayout.LabelField($"({toName})", GUILayout.Width(100));
-
+                EditorGUILayout.LabelField((fOk && tOk) ? "✓" : "❌",   GUILayout.Width(18));
+                EditorGUILayout.LabelField($"{c.fromNodeID} ({fn})",    GUILayout.Width(120));
+                EditorGUILayout.LabelField(c.bidirectional ? "⟷" : "→", GUILayout.Width(22));
+                EditorGUILayout.LabelField($"{c.toNodeID} ({tn})",      GUILayout.Width(120));
                 GUILayout.FlexibleSpace();
-
-                // Focus From button
-                if (GUILayout.Button($"👁️ From", GUILayout.Width(60), GUILayout.Height(20)))
-                {
-                    FocusOnNode(nav, conn.fromNodeID);
-                }
-
-                // Focus To button
-                if (GUILayout.Button($"👁️ To", GUILayout.Width(60), GUILayout.Height(20)))
-                {
-                    FocusOnNode(nav, conn.toNodeID);
-                }
-
-                // Delete button
-                GUI.backgroundColor = new Color(1f, 0.3f, 0.3f);
-                if (GUILayout.Button("🗑️", GUILayout.Width(30), GUILayout.Height(20)))
-                {
-                    if (EditorUtility.DisplayDialog(
-                        "Delete Connection",
-                        $"Delete: {conn.fromNodeID} → {conn.toNodeID}?",
-                        "Delete",
-                        "Cancel"))
-                    {
-                        DeleteConnection(nav, conn);
-                        break; // Exit loop after delete
-                    }
-                }
-
+                if (GUILayout.Button("👁️ F", GUILayout.Width(42), GUILayout.Height(18))) FocusNode(nav, c.fromNodeID);
+                if (GUILayout.Button("👁️ T", GUILayout.Width(42), GUILayout.Height(18))) FocusNode(nav, c.toNodeID);
+                GUI.backgroundColor = new Color(1f, 0.28f, 0.28f);
+                if (GUILayout.Button("🗑️", GUILayout.Width(28), GUILayout.Height(18)))
+                    if (EditorUtility.DisplayDialog("Delete", $"Delete {c.fromNodeID} {(c.bidirectional?"⟷":"→")} {c.toNodeID}?", "Delete", "Cancel"))
+                    { DeleteConn(nav, c); GUI.backgroundColor = Color.white; break; }
                 EditorGUILayout.EndHorizontal();
                 EditorGUILayout.EndVertical();
                 GUI.backgroundColor = Color.white;
-
-                GUILayout.Space(2);
+                GUILayout.Space(1);
             }
-
             EditorGUILayout.EndScrollView();
         }
-
         EditorGUILayout.EndVertical();
+        EditorGUILayout.EndFoldoutHeaderGroup();
     }
 
-    // ========================================
-    // HELPER FUNCTIONS
-    // ========================================
+    // =========================================================================
+    //  5. SNAP NODES PANEL
+    // =========================================================================
 
-    private void DeleteConnection(CentralizedNavigationSystem nav, ConnectionDefinition conn)
+    private void DrawSnapPanel(CentralizedNavigationSystem nav)
     {
-        Undo.RecordObject(nav, "Delete Connection");
-        nav.connectionDefinitions.Remove(conn);
-        nav.RefreshGraph();
-        EditorUtility.SetDirty(nav);
-        Debug.Log($"[NavSystem] Deleted connection: {conn.fromNodeID} → {conn.toNodeID}");
-    }
-
-    private void DeleteAllConnectionsForNode(CentralizedNavigationSystem nav, int nodeID)
-    {
-        Undo.RecordObject(nav, "Delete All Connections for Node");
-
-        int deletedCount = nav.connectionDefinitions.RemoveAll(conn =>
-            conn.fromNodeID == nodeID || conn.toNodeID == nodeID);
-
-        nav.RefreshGraph();
-        EditorUtility.SetDirty(nav);
-        Debug.Log($"[NavSystem] Deleted {deletedCount} connections for Node {nodeID}");
-    }
-
-    private void FocusOnNode(CentralizedNavigationSystem nav, int nodeID)
-    {
-        if (nav.nodeMap.ContainsKey(nodeID))
-        {
-            NavNode node = nav.nodeMap[nodeID];
-            Selection.activeGameObject = node.gameObject;
-            SceneView.lastActiveSceneView.FrameSelected();
-            Debug.Log($"[NavSystem] Focused on Node {nodeID} ({node.name})");
-        }
-        else
-        {
-            Debug.LogWarning($"[NavSystem] Node {nodeID} does not exist!");
-        }
-    }
-    // ========================================
-    // SNAP NODES TO ROAD SURFACE
-    // ========================================
-    private bool showSnapPanel = true;
-
-    private void DrawSnapToRoadSection(CentralizedNavigationSystem nav)
-    {
-        GUI.backgroundColor = new Color(0.55f, 0.9f, 0.55f);
-        showSnapPanel = EditorGUILayout.BeginFoldoutHeaderGroup(showSnapPanel, "🏔️  SNAP NODES TO ROAD SURFACE");
+        GUI.backgroundColor = new Color(0.5f, 0.88f, 0.5f);
+        _showSnapPanel = EditorGUILayout.BeginFoldoutHeaderGroup(_showSnapPanel, "🏔️  SNAP NODES TO ROAD SURFACE");
         GUI.backgroundColor = Color.white;
 
-        if (!showSnapPanel)
-        {
-            EditorGUILayout.EndFoldoutHeaderGroup();
-            return;
-        }
+        if (!_showSnapPanel) { EditorGUILayout.EndFoldoutHeaderGroup(); return; }
 
-        GUIStyle boxStyle = new GUIStyle(GUI.skin.box);
-        boxStyle.padding = new RectOffset(10, 10, 10, 10);
+        EditorGUILayout.BeginVertical(Box());
 
-        EditorGUILayout.BeginVertical(boxStyle);
-
-        // Info box
         EditorGUILayout.HelpBox(
-            "Fires a downward raycast from above each node and places it exactly on the road/terrain surface.\n" +
-            "Perfect for hills, slopes and uneven terrain where manual placement is hard.\n\n" +
-            "1. Set 'Snap Layer' to your Road + Terrain layers.\n" +
-            "2. Increase 'Raycast Origin Height' if your hills are very tall.\n" +
-            "3. Use 'Align To Surface' for sloped roads so nodes tilt with the road.",
+            "Fires a downward raycast from above each node to place it exactly on the road surface.\n" +
+            "Set 'Snap Layer' to your Road + Terrain layers before snapping.",
             MessageType.Info);
+        Space(5);
 
-        GUILayout.Space(6);
-
-        // ── Snap Layer ──────────────────────────────────────────────────────────
-        SerializedObject so = new SerializedObject(nav);
-        so.Update();
-
-        SerializedProperty snapLayerProp   = so.FindProperty("snapLayer");
-        SerializedProperty snapHeightProp  = so.FindProperty("snapRaycastOriginHeight");
-        SerializedProperty snapOffsetProp  = so.FindProperty("snapNodeHeightOffset");
-        SerializedProperty snapAlignProp   = so.FindProperty("snapAlignToSurface");
-        SerializedProperty autoSnapProp    = so.FindProperty("autoSnapNewNodes");
-
-        EditorGUILayout.PropertyField(snapLayerProp,  new GUIContent("Snap Layer",
-            "Layers considered as road/terrain surface. Set to your Road + Terrain layers."));
-        EditorGUILayout.PropertyField(snapHeightProp, new GUIContent("Raycast Origin Height",
-            "How many units above the node to start the downward ray. Raise this for tall hills."));
-        EditorGUILayout.PropertyField(snapOffsetProp, new GUIContent("Surface Height Offset",
-            "Small Y offset after landing on surface (prevents nodes clipping into mesh)."));
-        EditorGUILayout.PropertyField(snapAlignProp,  new GUIContent("Align To Surface Normal",
-            "Tilts the node to match the slope of the road. Useful for banked roads."));
-
-        GUILayout.Space(4);
-        EditorGUILayout.PropertyField(autoSnapProp, new GUIContent("Auto-Snap New Nodes",
-            "Automatically snap every newly created node to ground on creation."));
-
+        var so = new SerializedObject(nav); so.Update();
+        EditorGUILayout.PropertyField(so.FindProperty("snapLayer"),               new GUIContent("Snap Layer"));
+        EditorGUILayout.PropertyField(so.FindProperty("snapRaycastOriginHeight"), new GUIContent("Raycast Origin Height"));
+        EditorGUILayout.PropertyField(so.FindProperty("snapNodeHeightOffset"),    new GUIContent("Surface Height Offset"));
+        EditorGUILayout.PropertyField(so.FindProperty("snapAlignToSurface"),      new GUIContent("Align To Surface Normal"));
+        EditorGUILayout.PropertyField(so.FindProperty("autoSnapNewNodes"),        new GUIContent("Auto-Snap New Nodes"));
         so.ApplyModifiedProperties();
+        Space(8);
 
-        GUILayout.Space(8);
-
-        // ── Snap All Button ─────────────────────────────────────────────────────
-        GUI.backgroundColor = new Color(0.3f, 0.9f, 0.3f);
-        GUIStyle bigBtn = new GUIStyle(GUI.skin.button);
-        bigBtn.fontSize    = 13;
-        bigBtn.fontStyle   = FontStyle.Bold;
-        bigBtn.fixedHeight = 42;
-
-        if (GUILayout.Button("📍  SNAP ALL NODES TO ROAD SURFACE", bigBtn))
+        GUI.backgroundColor = new Color(0.28f, 0.88f, 0.28f);
+        if (GUILayout.Button("📍  SNAP ALL NODES TO ROAD SURFACE", BigBtn(42)))
         {
-            if (nav.nodes.Count == 0)
+            if (nav.nodes.Count == 0) EditorUtility.DisplayDialog("No Nodes", "No nodes found.", "OK");
+            else if (EditorUtility.DisplayDialog("Snap All Nodes",
+                $"Snap {nav.nodes.Count} nodes downward to road surface? (Undoable)", "Snap!", "Cancel"))
             {
-                EditorUtility.DisplayDialog("No Nodes", "There are no NavNodes in the system yet.", "OK");
-            }
-            else if (EditorUtility.DisplayDialog(
-                "Snap All Nodes",
-                $"Raycast {nav.nodes.Count} node(s) downward onto the surface?\n\n" +
-                "This is undoable (Edit → Undo).",
-                "Snap!",
-                "Cancel"))
-            {
-                Undo.SetCurrentGroupName("Snap All Nodes To Ground");
-                int undoGroup = Undo.GetCurrentGroup();
-
-                nav.SnapAllNodesToGround();
-
-                Undo.CollapseUndoOperations(undoGroup);
-                SceneView.RepaintAll();
+                Undo.SetCurrentGroupName("Snap All Nodes"); int grp = Undo.GetCurrentGroup();
+                nav.SnapAllNodesToGround(); Undo.CollapseUndoOperations(grp); SceneView.RepaintAll();
             }
         }
         GUI.backgroundColor = Color.white;
-
-        GUILayout.Space(4);
-
-        // ── Snap Selected Node Only ─────────────────────────────────────────────
-        GUI.backgroundColor = new Color(0.7f, 1f, 0.7f);
-        if (GUILayout.Button("📍  Snap SELECTED Node Only", GUILayout.Height(30)))
+        Space(3);
+        GUI.backgroundColor = new Color(0.65f, 1f, 0.65f);
+        if (GUILayout.Button("📍  Snap SELECTED Node Only", GUILayout.Height(28)))
         {
-            NavNode selected = Selection.activeGameObject?.GetComponent<NavNode>();
-            if (selected == null || selected.parentNavSystem != nav)
-            {
-                EditorUtility.DisplayDialog("No NavNode Selected",
-                    "Select a NavNode GameObject in the Hierarchy first.", "OK");
-            }
+            var sel = Selection.activeGameObject?.GetComponent<NavNode>();
+            if (sel == null || sel.parentNavSystem != nav)
+                EditorUtility.DisplayDialog("No NavNode Selected", "Select a NavNode in the Hierarchy first.", "OK");
             else
             {
-                Undo.SetCurrentGroupName("Snap Node To Ground");
-                int undoGroup = Undo.GetCurrentGroup();
-
-                bool hit = nav.SnapNodeToGround(selected);
-                Undo.CollapseUndoOperations(undoGroup);
-
-                if (hit) Debug.Log($"[NavSystem] Snapped '{selected.name}' to ground.");
-                SceneView.RepaintAll();
+                Undo.SetCurrentGroupName("Snap Node"); int grp = Undo.GetCurrentGroup();
+                bool hit = nav.SnapNodeToGround(sel); Undo.CollapseUndoOperations(grp);
+                if (hit) Debug.Log($"[NavSystem] Snapped '{sel.name}' to ground."); SceneView.RepaintAll();
             }
         }
         GUI.backgroundColor = Color.white;
@@ -720,5 +531,116 @@ public class CentralizedNavigationSystemEditor : Editor
         EditorGUILayout.EndVertical();
         EditorGUILayout.EndFoldoutHeaderGroup();
     }
+
+    // =========================================================================
+    //  6. NODE CREATION BUTTONS
+    // =========================================================================
+
+    private void DrawNodeCreationButtons(CentralizedNavigationSystem nav)
+    {
+        EditorGUILayout.LabelField("🚗  NODE CREATION", Bold());
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("🆕 Next Node (Selected)", GUILayout.Height(34))) nav.CreateNextNodeFromSelected();
+        GUILayout.Label("Select a NavNode first!", GUILayout.Width(130));
+        EditorGUILayout.EndHorizontal();
+        if (GUILayout.Button("➡️  Forward from Last Node", GUILayout.Height(34))) nav.CreateNodeForward();
+    }
+
+    // =========================================================================
+    //  7. GRAPH TOOL BUTTONS
+    // =========================================================================
+
+    private void DrawGraphToolButtons(CentralizedNavigationSystem nav)
+    {
+        EditorGUILayout.LabelField("🔧  GRAPH TOOLS", Bold());
+
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("🔗 Auto Connect",      GUILayout.Height(28))) nav.AutoConnectNodes();
+        if (GUILayout.Button("🧹 Clear Connections", GUILayout.Height(28))) nav.ClearAllConnections();
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("🎮 Setup Demo",     GUILayout.Height(28))) nav.SetupDemo();
+        if (GUILayout.Button("🎯 Test Path",      GUILayout.Height(28))) nav.TestPathZeroToLast();
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("📂 Collect Nodes",    GUILayout.Height(24))) nav.CollectAllNodes();
+        if (GUILayout.Button("🔎 Route Pool",       GUILayout.Height(24))) nav.DebugPrintRoutePool();
+        if (GUILayout.Button("🔎 Segments",         GUILayout.Height(24))) nav.DebugPrintSegmentCache();
+        EditorGUILayout.EndHorizontal();
+    }
+
+    // =========================================================================
+    //  CONNECTION ROW  (shared between search + all-connections panels)
+    // =========================================================================
+
+    private void DrawConnRow(CentralizedNavigationSystem nav,
+                             ConnectionDefinition conn, int currentNodeID, bool isOutgoing)
+    {
+        GUI.backgroundColor = conn.bidirectional
+            ? new Color(0.35f, 1f, 0.35f, 0.12f)
+            : new Color(1f, 0.72f, 0.35f, 0.12f);
+
+        EditorGUILayout.BeginVertical(GUI.skin.box);
+        EditorGUILayout.BeginHorizontal();
+
+        int    otherID   = isOutgoing ? conn.toNodeID : conn.fromNodeID;
+        string otherName = nav.nodeMap.ContainsKey(otherID) ? nav.nodeMap[otherID].name : "INVALID";
+        string arrow     = conn.bidirectional ? "⟷" : (isOutgoing ? "→" : "←");
+        string dir       = conn.bidirectional ? "Bidirectional" : "One-way";
+
+        EditorGUILayout.LabelField(arrow,              GUILayout.Width(22));
+        EditorGUILayout.LabelField($"Node {otherID}", GUILayout.Width(70));
+        EditorGUILayout.LabelField($"({otherName})",  GUILayout.Width(110));
+        EditorGUILayout.LabelField($"[{dir}]",        GUILayout.Width(90));
+        GUILayout.FlexibleSpace();
+
+        if (GUILayout.Button("👁️", GUILayout.Width(28), GUILayout.Height(18))) FocusNode(nav, otherID);
+
+        GUI.backgroundColor = new Color(1f, 0.28f, 0.28f);
+        if (GUILayout.Button("🗑️", GUILayout.Width(28), GUILayout.Height(18)))
+            if (EditorUtility.DisplayDialog("Delete Connection",
+                $"Delete: {conn.fromNodeID} {arrow} {conn.toNodeID} ({dir})?", "Delete", "Cancel"))
+                DeleteConn(nav, conn);
+        GUI.backgroundColor = Color.white;
+
+        EditorGUILayout.EndHorizontal();
+        EditorGUILayout.EndVertical();
+        GUI.backgroundColor = Color.white;
+        GUILayout.Space(1);
+    }
+
+    // =========================================================================
+    //  HELPERS
+    // =========================================================================
+
+    private void FocusNode(CentralizedNavigationSystem nav, int id)
+    {
+        if (!nav.nodeMap.ContainsKey(id)) { Debug.LogWarning($"[NavSystem] Node {id} not found."); return; }
+        Selection.activeGameObject = nav.nodeMap[id].gameObject;
+        SceneView.lastActiveSceneView?.FrameSelected();
+    }
+
+    private void DeleteConn(CentralizedNavigationSystem nav, ConnectionDefinition c)
+    {
+        Undo.RecordObject(nav, "Delete Connection");
+        nav.connectionDefinitions.Remove(c);
+        nav.RefreshGraph(); EditorUtility.SetDirty(nav);
+    }
+
+    private void DeleteAllForNode(CentralizedNavigationSystem nav, int id)
+    {
+        Undo.RecordObject(nav, "Delete All Connections For Node");
+        int removed = nav.connectionDefinitions.RemoveAll(c => c.fromNodeID == id || c.toNodeID == id);
+        nav.RefreshGraph(); EditorUtility.SetDirty(nav);
+        Debug.Log($"[NavSystem] Removed {removed} connections for Node {id}.");
+    }
+
+    // ── GUIStyle helpers ──────────────────────────────────────────────────────
+    private static GUIStyle Box()  { var s = new GUIStyle(GUI.skin.box); s.padding = new RectOffset(10,10,8,8); return s; }
+    private static GUIStyle Bold() => EditorStyles.boldLabel;
+    private static GUIStyle BigBtn(int h) { var s = new GUIStyle(GUI.skin.button) { fontSize=13, fontStyle=FontStyle.Bold, fixedHeight=h }; return s; }
+    private static void Space(int px) => GUILayout.Space(px);
 }
 #endif
