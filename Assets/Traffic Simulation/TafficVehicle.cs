@@ -132,11 +132,11 @@ public class TrafficVehicle : MonoBehaviour
     [SerializeField] private LayerMask npcVehicleLayer;
     [SerializeField] private LayerMask playerVehicleLayer;
     [SerializeField] private LayerMask trafficLightLayer;
-    [SerializeField] private float     detectionRange;
-    [SerializeField] private float     vehicleStoppingDistance;
-    [SerializeField] private float     obstacleStoppingDistance;
-    [SerializeField] private float     trafficLightStopDistance;
-    [SerializeField] private float     maxRedLightWaitTime;
+    [SerializeField] private float detectionRange;
+    [SerializeField] private float vehicleStoppingDistance;
+    [SerializeField] private float obstacleStoppingDistance;
+    [SerializeField] private float trafficLightStopDistance;
+    [SerializeField] private float maxRedLightWaitTime;
 
     [Header("═══  RUNTIME — GROUND & SLOPE  ═══")]
     [SerializeField] private LayerMask groundLayer;
@@ -161,12 +161,12 @@ public class TrafficVehicle : MonoBehaviour
     [SerializeField] private float hillClimbBoost;
 
     [Header("═══  RUNTIME — STUCK DETECTION  ═══")]
-    [SerializeField] private int   maxStuckFrames;
+    [SerializeField] private int maxStuckFrames;
     [SerializeField] private float stuckMovementThreshold;
-    [SerializeField] private int   maxPathRecalculations;
+    [SerializeField] private int maxPathRecalculations;
 
     [Header("═══  RUNTIME — DEBUG  ═══")]
-    [SerializeField] public bool  showDebugRays;
+    [SerializeField] public bool showDebugRays;
     [SerializeField] private bool showDebugGizmos;
 
     // =========================================================================
@@ -222,9 +222,9 @@ public class TrafficVehicle : MonoBehaviour
     [SerializeField] private float wheelRayDistance = 2.0f;
 
     // ── Per-wheel hit cache ───────────────────────────────────────────────────
-    private bool    _wFL_hit, _wFR_hit, _wRL_hit, _wRR_hit;
-    private Vector3 _wFL_pt,  _wFR_pt,  _wRL_pt,  _wRR_pt;
-    private int     _wheelHitCount = 0;
+    private bool _wFL_hit, _wFR_hit, _wRL_hit, _wRR_hit;
+    private Vector3 _wFL_pt, _wFR_pt, _wRL_pt, _wRR_pt;
+    private int _wheelHitCount = 0;
 
     // =========================================================================
     //  NAVMESH ROAD CLAMPING
@@ -232,7 +232,7 @@ public class TrafficVehicle : MonoBehaviour
 
     [Header("═══  NAVMESH ROAD CLAMPING  ═══")]
     [SerializeField] private float navMeshSampleRadius = 4f;
-    [SerializeField] private int   navMeshAreaMask     = NavMesh.AllAreas;
+    [SerializeField] private int navMeshAreaMask = NavMesh.AllAreas;
 
     [Tooltip("Maximum lateral (XZ) correction NavMesh clamping is allowed to apply.\n" +
              "Prevents the car being snapped sideways onto baked pavement / kerb.\n" +
@@ -244,43 +244,43 @@ public class TrafficVehicle : MonoBehaviour
     // =========================================================================
 
     [Header("═══  ROUTE  (read-only)  ═══")]
-    [SerializeField] private int sourceNodeID      = -1;
+    [SerializeField] private int sourceNodeID = -1;
     [SerializeField] private int destinationNodeID = -1;
-    [SerializeField] private int currentNodeID     = -1;
+    [SerializeField] private int currentNodeID = -1;
 
     private List<Vector3> denseWaypoints = new List<Vector3>();
-    private int           waypointIndex  = 0;
-    private Vector3       currentTarget;
-    private bool          hasTarget      = false;
+    private int waypointIndex = 0;
+    private Vector3 currentTarget;
+    private bool hasTarget = false;
 
     // ── Recovery state ────────────────────────────────────────────────────────
     // Set true while denseWaypoints contains a live-injected NavMesh segment.
     // Cleared once waypointIndex advances past the injected segment.
-    private bool _inNavMeshRecovery   = false;
-    private int  _recoveryEndIndex    = 0;
+    private bool _inNavMeshRecovery = false;
+    private int _recoveryEndIndex = 0;
 
     // =========================================================================
     //  MOVEMENT STATE
     // =========================================================================
 
-    private float   currentSpeed           = 0f;
-    private float   speedSmoothVelocity    = 0f;
-    private float   targetSpeed            = 0f;
-    public  bool    isStopped              = false;
-    private float   angleToCurrentWaypoint = 0f;
-    private float   currentSteerAngle      = 0f;
+    private float currentSpeed = 0f;
+    private float speedSmoothVelocity = 0f;
+    private float targetSpeed = 0f;
+    public bool isStopped = false;
+    private float angleToCurrentWaypoint = 0f;
+    private float currentSteerAngle = 0f;
 
     private Vector3 lastValidPosition;
-    private int     stuckCounter       = 0;
-    private bool    isStuck            = false;
-    private int     pathRecalculations = 0;
-    private float   lastAdvanceTime    = -999f;
-    private bool    _advancedThisFrame = false;
+    private int stuckCounter = 0;
+    private bool isStuck = false;
+    private int pathRecalculations = 0;
+    private float lastAdvanceTime = -999f;
+    private bool _advancedThisFrame = false;
 
     // Ground state
-    private bool    isGrounded     = false;
-    private Vector3 groundNormal   = Vector3.up;
-    private float   currentGroundY = 0f;
+    private bool isGrounded = false;
+    private Vector3 groundNormal = Vector3.up;
+    private float currentGroundY = 0f;
     private Vector3 groundHitPoint = Vector3.zero;
 
     // Tilt
@@ -292,13 +292,13 @@ public class TrafficVehicle : MonoBehaviour
 
     private enum HitType { None, NpcVehicle, PlayerVehicle, TrafficLight, Obstacle }
 
-    private HitType    _hitType     = HitType.None;
-    private float      _hitDistance = 0f;
-    private GameObject _hitObject   = null;
+    private HitType _hitType = HitType.None;
+    private float _hitDistance = 0f;
+    private GameObject _hitObject = null;
 
-    private TrafficLightController _currentLight      = null;
-    private bool                   _stoppedAtRed      = false;
-    private float                  _redLightEntryTime = 0f;
+    private TrafficLightController _currentLight = null;
+    private bool _stoppedAtRed = false;
+    private float _redLightEntryTime = 0f;
 
     // =========================================================================
     //  SCENE GIZMO TOGGLES
@@ -317,58 +317,58 @@ public class TrafficVehicle : MonoBehaviour
     [SerializeField] private bool gizmoShowCurrentWaypoint = true;
     [Tooltip("Number of upcoming NavMesh waypoints to show beyond the current one (0-5).")]
     [Range(0, 5)]
-    [SerializeField] private int  gizmoUpcomingWaypointCount = 3;
+    [SerializeField] private int gizmoUpcomingWaypointCount = 3;
     [Tooltip("Show the full remaining route path as a thin coloured line.")]
     [SerializeField] private bool gizmoShowFullRoute = true;
     [Tooltip("Show WP+1, WP+2 … labels on upcoming waypoints in Scene view.")]
     [SerializeField] private bool gizmoShowWaypointLabels = true;
 
     // ── Cached per-FixedUpdate so Gizmos thread can read them safely ─────────
-    private Vector3 _gizDetectOrigin  = Vector3.zero;   // detection ray start
-    private Vector3 _gizDetectDir     = Vector3.forward; // detection ray direction
-    private bool    _gizDetectHit     = false;           // did detection ray hit?
-    private Vector3 _gizDetectHitPt   = Vector3.zero;   // hit world position
-    private float   _gizDetectRange   = 20f;             // full ray length
+    private Vector3 _gizDetectOrigin = Vector3.zero;   // detection ray start
+    private Vector3 _gizDetectDir = Vector3.forward; // detection ray direction
+    private bool _gizDetectHit = false;           // did detection ray hit?
+    private Vector3 _gizDetectHitPt = Vector3.zero;   // hit world position
+    private float _gizDetectRange = 20f;             // full ray length
 
     private Vector3 _gizWheelOriginFL = Vector3.zero;   // per-wheel ray start points
     private Vector3 _gizWheelOriginFR = Vector3.zero;
     private Vector3 _gizWheelOriginRL = Vector3.zero;
     private Vector3 _gizWheelOriginRR = Vector3.zero;
 
-    private Vector3 _gizCentreOrigin  = Vector3.zero;   // centre-body fallback ray
-    private bool    _gizCentreHit     = false;
-    private Vector3 _gizCentreHitPt   = Vector3.zero;
-    private float   _gizCentreLen     = 10f;
+    private Vector3 _gizCentreOrigin = Vector3.zero;   // centre-body fallback ray
+    private bool _gizCentreHit = false;
+    private Vector3 _gizCentreHitPt = Vector3.zero;
+    private float _gizCentreLen = 10f;
 
     // =========================================================================
     //  DEBUG INSPECTOR
     // =========================================================================
 
     [Header("═══  DEBUG INFO (read-only)  ═══")]
-    [SerializeField] private string  debugChainName           = "";
-    [SerializeField] private int     debugCurrentWaypoint     = 0;
-    [SerializeField] private int     debugNextWaypointIndex   = 0;
-    [SerializeField] private int     debugCurrentNodeID       = -1;
-    [SerializeField] private int     debugNextNodeID          = -1;
-    [SerializeField] private int     debugTotalWaypoints      = 0;
-    [SerializeField] private float   debugProgressPct         = 0f;
-    [SerializeField] private float   debugDistToDest          = 0f;
-    [SerializeField] private float   debugCurrentSpeed        = 0f;
-    [SerializeField] private float   debugDistanceToWaypoint  = 0f;
-    [SerializeField] private bool    debugIsStuck             = false;
-    [SerializeField] private bool    debugIsObstacleDetected  = false;
-    [SerializeField] private Vector3 debugTargetPosition      = Vector3.zero;
-    [SerializeField] private Vector3 debugSpawnPosition       = Vector3.zero;
-    [SerializeField] private string  debugHitType             = "None";
-    [SerializeField] private float   debugHitDist             = 0f;
-    [SerializeField] private string  debugLightState          = "None";
-    [SerializeField] private bool    debugGrounded            = false;
-    [SerializeField] private float   debugSlopeAngle          = 0f;
-    [SerializeField] private float   debugGroundY             = 0f;
-    [SerializeField] private string  debugGroundSource        = "None";
-    [SerializeField] private int     debugWheelHits           = 0;
-    [SerializeField] private bool    debugInNavMeshRecovery   = false;
-    [SerializeField] private float   debugSpeedMult           = 1f;  // 0=stopped, 1=full speed
+    [SerializeField] private string debugChainName = "";
+    [SerializeField] private int debugCurrentWaypoint = 0;
+    [SerializeField] private int debugNextWaypointIndex = 0;
+    [SerializeField] private int debugCurrentNodeID = -1;
+    [SerializeField] private int debugNextNodeID = -1;
+    [SerializeField] private int debugTotalWaypoints = 0;
+    [SerializeField] private float debugProgressPct = 0f;
+    [SerializeField] private float debugDistToDest = 0f;
+    [SerializeField] private float debugCurrentSpeed = 0f;
+    [SerializeField] private float debugDistanceToWaypoint = 0f;
+    [SerializeField] private bool debugIsStuck = false;
+    [SerializeField] private bool debugIsObstacleDetected = false;
+    [SerializeField] private Vector3 debugTargetPosition = Vector3.zero;
+    [SerializeField] private Vector3 debugSpawnPosition = Vector3.zero;
+    [SerializeField] private string debugHitType = "None";
+    [SerializeField] private float debugHitDist = 0f;
+    [SerializeField] private string debugLightState = "None";
+    [SerializeField] private bool debugGrounded = false;
+    [SerializeField] private float debugSlopeAngle = 0f;
+    [SerializeField] private float debugGroundY = 0f;
+    [SerializeField] private string debugGroundSource = "None";
+    [SerializeField] private int debugWheelHits = 0;
+    [SerializeField] private bool debugInNavMeshRecovery = false;
+    [SerializeField] private float debugSpeedMult = 1f;  // 0=stopped, 1=full speed
 
     private Color _gizmoColor = Color.green;
 
@@ -387,9 +387,9 @@ public class TrafficVehicle : MonoBehaviour
         {
             // Average direction of first min(3, count-1) waypoint steps.
             // Weight each step by its length so micro-steps don't dominate.
-            int     samples  = Mathf.Min(3, denseWaypoints.Count - 1);
+            int samples = Mathf.Min(3, denseWaypoints.Count - 1);
             Vector3 weightedDir = Vector3.zero;
-            float   totalLen    = 0f;
+            float totalLen = 0f;
 
             for (int i = 0; i < samples; i++)
             {
@@ -399,7 +399,7 @@ public class TrafficVehicle : MonoBehaviour
                 if (len > 0.01f)
                 {
                     weightedDir += step.normalized * len;
-                    totalLen    += len;
+                    totalLen += len;
                 }
             }
 
@@ -458,61 +458,61 @@ public class TrafficVehicle : MonoBehaviour
         navSystem = navSys;
 
         // Ground config
-        groundLayer        = groundCfg.groundLayer;
-        groundRayUpOffset  = groundCfg.groundRayUpOffset;
-        groundRayDistance  = groundCfg.groundRayDistance;
-        rideHeight         = groundCfg.rideHeight;
+        groundLayer = groundCfg.groundLayer;
+        groundRayUpOffset = groundCfg.groundRayUpOffset;
+        groundRayDistance = groundCfg.groundRayDistance;
+        rideHeight = groundCfg.rideHeight;
         groundSnapStrength = groundCfg.groundSnapStrength;
-        slopeTiltSpeed     = groundCfg.slopeTiltSpeed;
-        hillClimbBoost     = groundCfg.hillClimbBoost;
+        slopeTiltSpeed = groundCfg.slopeTiltSpeed;
+        hillClimbBoost = groundCfg.hillClimbBoost;
 
         // Movement
-        maxSpeed        = sharedCfg.speed * UnityEngine.Random.Range(0.85f, 1.15f);
-        turnSpeed       = sharedCfg.turnSpeed;
+        maxSpeed = sharedCfg.speed * UnityEngine.Random.Range(0.85f, 1.15f);
+        turnSpeed = sharedCfg.turnSpeed;
         speedSmoothTime = sharedCfg.speedSmoothTime;
 
         // Waypoint
         waypointReachDistanceXZ = sharedCfg.waypointReachDistanceXZ;
-        waypointReachDistanceY  = sharedCfg.waypointReachDistanceY;
-        minAdvanceInterval      = sharedCfg.minAdvanceInterval;
+        waypointReachDistanceY = sharedCfg.waypointReachDistanceY;
+        minAdvanceInterval = sharedCfg.minAdvanceInterval;
 
         // Detection
-        detectionLayerMask       = sharedCfg.detectionLayerMask;
-        npcVehicleLayer          = sharedCfg.npcVehicleLayer;
-        playerVehicleLayer       = sharedCfg.playerVehicleLayer;
-        trafficLightLayer        = sharedCfg.trafficLightLayer;
-        detectionRange           = sharedCfg.detectionRange;
-        vehicleStoppingDistance  = sharedCfg.vehicleStoppingDistance;
+        detectionLayerMask = sharedCfg.detectionLayerMask;
+        npcVehicleLayer = sharedCfg.npcVehicleLayer;
+        playerVehicleLayer = sharedCfg.playerVehicleLayer;
+        trafficLightLayer = sharedCfg.trafficLightLayer;
+        detectionRange = sharedCfg.detectionRange;
+        vehicleStoppingDistance = sharedCfg.vehicleStoppingDistance;
         obstacleStoppingDistance = sharedCfg.obstacleStoppingDistance;
         trafficLightStopDistance = sharedCfg.trafficLightStopDistance;
-        maxRedLightWaitTime      = sharedCfg.maxRedLightWaitTime;
+        maxRedLightWaitTime = sharedCfg.maxRedLightWaitTime;
 
         // Stuck
-        maxStuckFrames         = sharedCfg.maxStuckFrames;
+        maxStuckFrames = sharedCfg.maxStuckFrames;
         stuckMovementThreshold = sharedCfg.stuckMovementThreshold;
-        maxPathRecalculations  = sharedCfg.maxPathRecalculations;
+        maxPathRecalculations = sharedCfg.maxPathRecalculations;
 
         showDebugGizmos = sharedCfg.showDebugGizmos;
 
         // ── Rigidbody ─────────────────────────────────────────────────────────
         rb = GetComponent<Rigidbody>() ?? gameObject.AddComponent<Rigidbody>();
-        rb.mass            = 1200f;
-        rb.linearDamping   = 4f;
-        rb.angularDamping  = 10f;
-        rb.interpolation   = RigidbodyInterpolation.Interpolate;
-        rb.useGravity      = false;
-        rb.constraints     = RigidbodyConstraints.None;
+        rb.mass = 1200f;
+        rb.linearDamping = 4f;
+        rb.angularDamping = 10f;
+        rb.interpolation = RigidbodyInterpolation.Interpolate;
+        rb.useGravity = false;
+        rb.constraints = RigidbodyConstraints.None;
 
         // ── Node anchor ───────────────────────────────────────────────────────
-        sourceNodeID      = navSystem.nodeMap.ContainsKey(startNodeID)
+        sourceNodeID = navSystem.nodeMap.ContainsKey(startNodeID)
                               ? startNodeID : navSystem.GetRandomNode();
-        currentNodeID     = sourceNodeID;
+        currentNodeID = sourceNodeID;
         destinationNodeID = -1;
 
-        lastValidPosition  = transform.position;
+        lastValidPosition = transform.position;
         debugSpawnPosition = transform.position;
 
-        _gizmoColor        = new Color(UnityEngine.Random.value,
+        _gizmoColor = new Color(UnityEngine.Random.value,
                                        UnityEngine.Random.value,
                                        UnityEngine.Random.value);
         _smoothedSlopeTilt = transform.rotation;
@@ -544,7 +544,7 @@ public class TrafficVehicle : MonoBehaviour
     private static Transform ResolveSteerPivot(Transform spinTransform, Transform explicitPivot)
     {
         if (explicitPivot != null) return explicitPivot;
-        if (spinTransform  != null) return spinTransform.parent;
+        if (spinTransform != null) return spinTransform.parent;
         return null;
     }
 
@@ -601,7 +601,7 @@ public class TrafficVehicle : MonoBehaviour
                 slopeFactor = Mathf.Lerp(1f, 0.72f, Mathf.Clamp01(debugSlopeAngle / 35f));
         }
 
-        targetSpeed  = maxSpeed * slopeFactor * speedMult;
+        targetSpeed = maxSpeed * slopeFactor * speedMult;
         currentSpeed = Mathf.SmoothDamp(currentSpeed, targetSpeed,
                                         ref speedSmoothVelocity, speedSmoothTime);
 
@@ -624,20 +624,20 @@ public class TrafficVehicle : MonoBehaviour
                 }
                 else
                 {
-                    stuckCounter      = 0;
-                    isStuck           = debugIsStuck = false;
+                    stuckCounter = 0;
+                    isStuck = debugIsStuck = false;
                     lastValidPosition = transform.position;
                 }
             }
         }
         else
         {
-            stuckCounter      = 0;
-            isStuck           = debugIsStuck = false;
+            stuckCounter = 0;
+            isStuck = debugIsStuck = false;
             lastValidPosition = transform.position;
         }
         debugInNavMeshRecovery = _inNavMeshRecovery;
-        debugSpeedMult         = debugSpeedMultiplier;
+        debugSpeedMult = debugSpeedMultiplier;
         UpdateDebugInfo();
     }
 
@@ -701,23 +701,23 @@ public class TrafficVehicle : MonoBehaviour
 
         // Centre-body fallback
         Vector3 origin = transform.position + Vector3.up * groundRayUpOffset;
-        float   dist   = groundRayDistance + groundRayUpOffset;
+        float dist = groundRayDistance + groundRayUpOffset;
 
         // Cache for gizmos
         _gizCentreOrigin = origin;
-        _gizCentreLen    = dist;
+        _gizCentreLen = dist;
 
         if (Physics.Raycast(origin, Vector3.down, out RaycastHit hit, dist,
                             groundLayer, QueryTriggerInteraction.Ignore))
         {
-            isGrounded      = debugGrounded = true;
-            groundNormal    = hit.normal;
-            currentGroundY  = hit.point.y;
-            groundHitPoint  = hit.point;
-            debugGroundY    = currentGroundY;
+            isGrounded = debugGrounded = true;
+            groundNormal = hit.normal;
+            currentGroundY = hit.point.y;
+            groundHitPoint = hit.point;
+            debugGroundY = currentGroundY;
             debugSlopeAngle = Vector3.Angle(Vector3.up, groundNormal);
             debugGroundSource = "CentreBody";
-            _gizCentreHit   = true;
+            _gizCentreHit = true;
             _gizCentreHitPt = hit.point;
 
             if (showDebugRays) Debug.DrawLine(origin, hit.point, Color.yellow);
@@ -725,10 +725,10 @@ public class TrafficVehicle : MonoBehaviour
         else
         {
             isGrounded = debugGrounded = false;
-            groundNormal      = Vector3.up;
-            debugSlopeAngle   = 0f;
+            groundNormal = Vector3.up;
+            debugSlopeAngle = 0f;
             debugGroundSource = "Airborne";
-            _gizCentreHit     = false;
+            _gizCentreHit = false;
 
             if (showDebugRays) Debug.DrawRay(origin, Vector3.down * dist, Color.red);
         }
@@ -757,12 +757,12 @@ public class TrafficVehicle : MonoBehaviour
     {
         Vector3 d1 = _wRR_pt - _wFL_pt;
         Vector3 d2 = _wFR_pt - _wRL_pt;
-        Vector3 n  = Vector3.Cross(d1, d2).normalized;
+        Vector3 n = Vector3.Cross(d1, d2).normalized;
         if (n.y < 0f) n = -n;
 
-        groundNormal   = ClampNormal(n);
+        groundNormal = ClampNormal(n);
         currentGroundY = (_wFL_pt.y + _wFR_pt.y + _wRL_pt.y + _wRR_pt.y) * 0.25f;
-        groundHitPoint = (_wFL_pt   + _wFR_pt   + _wRL_pt   + _wRR_pt  ) * 0.25f;
+        groundHitPoint = (_wFL_pt + _wFR_pt + _wRL_pt + _wRR_pt) * 0.25f;
     }
 
     private void Compute3WheelNormal()
@@ -776,35 +776,35 @@ public class TrafficVehicle : MonoBehaviour
         Vector3 n = Vector3.Cross(pts[1] - pts[0], pts[2] - pts[0]).normalized;
         if (n.y < 0f) n = -n;
 
-        groundNormal   = ClampNormal(n);
+        groundNormal = ClampNormal(n);
         currentGroundY = (pts[0].y + pts[1].y + pts[2].y) / 3f;
-        groundHitPoint = (pts[0]   + pts[1]   + pts[2]  ) / 3f;
+        groundHitPoint = (pts[0] + pts[1] + pts[2]) / 3f;
     }
 
     private void Compute2WheelNormal()
     {
         Vector3 a, b;
-        if      (_wFL_hit && _wFR_hit) { a = _wFL_pt; b = _wFR_pt; }
+        if (_wFL_hit && _wFR_hit) { a = _wFL_pt; b = _wFR_pt; }
         else if (_wRL_hit && _wRR_hit) { a = _wRL_pt; b = _wRR_pt; }
         else if (_wFL_hit && _wRL_hit) { a = _wFL_pt; b = _wRL_pt; }
         else if (_wFR_hit && _wRR_hit) { a = _wFR_pt; b = _wRR_pt; }
         else if (_wFL_hit && _wRR_hit) { a = _wFL_pt; b = _wRR_pt; }
-        else                           { a = _wFR_pt; b = _wRL_pt; }
+        else { a = _wFR_pt; b = _wRL_pt; }
 
-        Vector3 axis  = (b - a).normalized;
+        Vector3 axis = (b - a).normalized;
         Vector3 right = Vector3.Cross(Vector3.up, axis).normalized;
-        Vector3 n     = Vector3.Cross(axis, right).normalized;
+        Vector3 n = Vector3.Cross(axis, right).normalized;
         if (n.y < 0f) n = -n;
 
-        groundNormal   = ClampNormal(n);
+        groundNormal = ClampNormal(n);
         currentGroundY = (a.y + b.y) * 0.5f;
-        groundHitPoint = (a   + b  ) * 0.5f;
+        groundHitPoint = (a + b) * 0.5f;
     }
 
     private void ComputeSingleWheelFallback()
     {
         Vector3 pt = _wFL_hit ? _wFL_pt : _wFR_hit ? _wFR_pt : _wRL_hit ? _wRL_pt : _wRR_pt;
-        groundNormal   = Vector3.up;
+        groundNormal = Vector3.up;
         currentGroundY = pt.y;
         groundHitPoint = pt;
     }
@@ -863,21 +863,21 @@ public class TrafficVehicle : MonoBehaviour
 
     private void RunDetection()
     {
-        _hitType     = HitType.None;
+        _hitType = HitType.None;
         _hitDistance = float.MaxValue;
-        _hitObject   = null;
+        _hitObject = null;
 
-        Vector3 origin  = transform.position + Vector3.up * 1.2f;
-        Vector3 rawFwd  = transform.forward;
+        Vector3 origin = transform.position + Vector3.up * 1.2f;
+        Vector3 rawFwd = transform.forward;
         Vector3 forward = new Vector3(rawFwd.x,
                                       Mathf.Clamp(rawFwd.y, -0.35f, 0.35f),
                                       rawFwd.z).normalized;
 
         // ── Cache for gizmo drawing ───────────────────────────────────────────
         _gizDetectOrigin = origin;
-        _gizDetectDir    = forward;
-        _gizDetectRange  = detectionRange;
-        _gizDetectHit    = false;
+        _gizDetectDir = forward;
+        _gizDetectRange = detectionRange;
+        _gizDetectHit = false;
 
         // ── Step 1: Proximity scan for roadside traffic lights ────────────────
         // Runs BEFORE the forward ray so _currentLight is always up to date.
@@ -903,15 +903,15 @@ public class TrafficVehicle : MonoBehaviour
             if ((layerBit & trafficLightLayer) != 0) continue;
 
             HitType type;
-            if      ((layerBit & npcVehicleLayer)    != 0) type = HitType.NpcVehicle;
+            if ((layerBit & npcVehicleLayer) != 0) type = HitType.NpcVehicle;
             else if ((layerBit & playerVehicleLayer) != 0) type = HitType.PlayerVehicle;
-            else                                            type = HitType.Obstacle;
+            else type = HitType.Obstacle;
 
-            _hitType          = type;
-            _hitDistance      = hit.distance;
-            _hitObject        = hit.collider.gameObject;
-            _gizDetectHit     = true;
-            _gizDetectHitPt   = hit.point;
+            _hitType = type;
+            _hitDistance = hit.distance;
+            _hitObject = hit.collider.gameObject;
+            _gizDetectHit = true;
+            _gizDetectHitPt = hit.point;
             break;
         }
 
@@ -924,9 +924,9 @@ public class TrafficVehicle : MonoBehaviour
             float dist = Vector3.Distance(transform.position, _currentLight.transform.position);
             if (dist <= trafficLightStopDistance)
             {
-                _hitType     = HitType.TrafficLight;
+                _hitType = HitType.TrafficLight;
                 _hitDistance = dist;
-                _hitObject   = _currentLight.gameObject;
+                _hitObject = _currentLight.gameObject;
             }
         }
 
@@ -935,21 +935,21 @@ public class TrafficVehicle : MonoBehaviour
             Color c;
             switch (_hitType)
             {
-                case HitType.TrafficLight:   c = Color.cyan;   break;
+                case HitType.TrafficLight: c = Color.cyan; break;
                 case HitType.NpcVehicle:
                 case HitType.PlayerVehicle:
                     c = _hitDistance < vehicleStoppingDistance ? Color.red : Color.yellow; break;
-                case HitType.Obstacle:       c = Color.red;    break;
-                default:                     c = Color.green;  break;
+                case HitType.Obstacle: c = Color.red; break;
+                default: c = Color.green; break;
             }
             Debug.DrawRay(origin, forward * detectionRange, c);
         }
 
-        debugHitType            = _hitType.ToString();
-        debugHitDist            = _hitType != HitType.None ? _hitDistance : 0f;
-        debugLightState         = _currentLight != null
+        debugHitType = _hitType.ToString();
+        debugHitDist = _hitType != HitType.None ? _hitDistance : 0f;
+        debugLightState = _currentLight != null
                                     ? _currentLight.currentState.ToString() : "None";
-        debugIsObstacleDetected = (_hitType == HitType.Obstacle   ||
+        debugIsObstacleDetected = (_hitType == HitType.Obstacle ||
                                    _hitType == HitType.NpcVehicle ||
                                    _hitType == HitType.PlayerVehicle);
     }
@@ -980,14 +980,14 @@ public class TrafficVehicle : MonoBehaviour
             return;
         }
 
-        TrafficLightController bestLight    = null;
-        float                  bestDist     = float.MaxValue;
+        TrafficLightController bestLight = null;
+        float bestDist = float.MaxValue;
 
         foreach (Collider col in nearby)
         {
             // Must be in front of the car (not behind us)
             Vector3 toLight = (col.transform.position - transform.position);
-            float   dot     = Vector3.Dot(forward, toLight.normalized);
+            float dot = Vector3.Dot(forward, toLight.normalized);
             if (dot < -0.2f) continue;   // behind or far to the side — ignore
 
             TrafficLightController tlc = col.GetComponentInParent<TrafficLightController>();
@@ -996,7 +996,7 @@ public class TrafficVehicle : MonoBehaviour
             float dist = toLight.magnitude;
             if (dist < bestDist)
             {
-                bestDist  = dist;
+                bestDist = dist;
                 bestLight = tlc;
             }
         }
@@ -1083,24 +1083,24 @@ public class TrafficVehicle : MonoBehaviour
         {
             case HitType.NpcVehicle:
             case HitType.PlayerVehicle:
-            {
-                float mult = GetVehicleSpeedMultiplier();
-                debugSpeedMultiplier = mult;
-                return mult;
-            }
+                {
+                    float mult = GetVehicleSpeedMultiplier();
+                    debugSpeedMultiplier = mult;
+                    return mult;
+                }
             case HitType.Obstacle:
-            {
-                float hard      = obstacleStoppingDistance;
-                float brakeEnd  = hard;
-                float brakeStart = hard * vehicleBrakeStartMult;
-                float mult = _hitDistance <= brakeEnd
-                    ? 0f
-                    : _hitDistance <= brakeStart
-                        ? Mathf.Clamp01((_hitDistance - brakeEnd) / (brakeStart - brakeEnd))
-                        : 1f;
-                debugSpeedMultiplier = mult;
-                return mult;
-            }
+                {
+                    float hard = obstacleStoppingDistance;
+                    float brakeEnd = hard;
+                    float brakeStart = hard * vehicleBrakeStartMult;
+                    float mult = _hitDistance <= brakeEnd
+                        ? 0f
+                        : _hitDistance <= brakeStart
+                            ? Mathf.Clamp01((_hitDistance - brakeEnd) / (brakeStart - brakeEnd))
+                            : 1f;
+                    debugSpeedMultiplier = mult;
+                    return mult;
+                }
             default:
                 debugSpeedMultiplier = 1f;
                 return 1f;
@@ -1110,13 +1110,13 @@ public class TrafficVehicle : MonoBehaviour
     // ── Proportional brake ramp toward a vehicle ahead ────────────────────────
     private float GetVehicleSpeedMultiplier()
     {
-        float hard       = vehicleStoppingDistance;
+        float hard = vehicleStoppingDistance;
         float brakeStart = hard * vehicleBrakeStartMult;
 
         // Player vehicle — always stop, no TrafficVehicle component needed
         if (_hitType == HitType.PlayerVehicle)
         {
-            if (_hitDistance <= hard)       return 0f;
+            if (_hitDistance <= hard) return 0f;
             if (_hitDistance <= brakeStart) return Ramp(_hitDistance, hard, brakeStart);
             return 1f;
         }
@@ -1134,14 +1134,14 @@ public class TrafficVehicle : MonoBehaviour
                 if (ahead.isStopped || ahead.currentSpeed < 0.5f)
                 {
                     // The car ahead is stopped → ramp down to 0 at stopDist
-                    if (_hitDistance <= hard)       return 0f;
+                    if (_hitDistance <= hard) return 0f;
                     if (_hitDistance <= brakeStart) return Ramp(_hitDistance, hard, brakeStart);
                     return 1f;
                 }
                 else
                 {
                     // The car ahead is moving — only slow when very close
-                    if (_hitDistance <= hard)       return Mathf.Max(0.1f, ahead.currentSpeed / maxSpeed);
+                    if (_hitDistance <= hard) return Mathf.Max(0.1f, ahead.currentSpeed / maxSpeed);
                     if (_hitDistance <= brakeStart * 0.5f)
                         return Ramp(_hitDistance, hard, brakeStart * 0.5f);
                     return 1f;
@@ -1150,7 +1150,7 @@ public class TrafficVehicle : MonoBehaviour
         }
 
         // Generic vehicle-layer obstacle
-        if (_hitDistance <= hard)       return 0f;
+        if (_hitDistance <= hard) return 0f;
         if (_hitDistance <= brakeStart) return Ramp(_hitDistance, hard, brakeStart);
         return 1f;
     }
@@ -1169,8 +1169,8 @@ public class TrafficVehicle : MonoBehaviour
         }
 
         float distToLight = Vector3.Distance(transform.position, _currentLight.transform.position);
-        float hard        = trafficLightStopDistance;
-        float brakeStart  = hard * lightBrakeStartMult;
+        float hard = trafficLightStopDistance;
+        float brakeStart = hard * lightBrakeStartMult;
 
         // Yellow light: only brake when inside the braking zone
         if (state == TrafficLightController.LightState.Yellow && distToLight > brakeStart)
@@ -1217,11 +1217,11 @@ public class TrafficVehicle : MonoBehaviour
 
         if (toTargetXZ.sqrMagnitude > 0.01f)
         {
-            Quaternion targetYaw  = Quaternion.LookRotation(toTargetXZ, Vector3.up);
+            Quaternion targetYaw = Quaternion.LookRotation(toTargetXZ, Vector3.up);
             Quaternion currentYaw = Quaternion.Euler(0f, rb.rotation.eulerAngles.y, 0f);
-            float      turnMult   = Mathf.Lerp(1f, 2.5f,
+            float turnMult = Mathf.Lerp(1f, 2.5f,
                                         Mathf.Clamp01(angleToCurrentWaypoint / 90f));
-            Quaternion smoothYaw  = Quaternion.Slerp(currentYaw, targetYaw,
+            Quaternion smoothYaw = Quaternion.Slerp(currentYaw, targetYaw,
                                         Time.fixedDeltaTime * turnSpeed * turnMult);
 
             float yawDelta = Mathf.DeltaAngle(currentYaw.eulerAngles.y,
@@ -1258,7 +1258,7 @@ public class TrafficVehicle : MonoBehaviour
         if (flatFwd.sqrMagnitude < 0.001f) flatFwd = Vector3.forward;
         flatFwd.Normalize();
 
-        float   moveDist = currentSpeed * align * Time.fixedDeltaTime;
+        float moveDist = currentSpeed * align * Time.fixedDeltaTime;
         Vector3 newXZPos = new Vector3(rb.position.x + flatFwd.x * moveDist,
                                        rb.position.y,
                                        rb.position.z + flatFwd.z * moveDist);
@@ -1284,7 +1284,7 @@ public class TrafficVehicle : MonoBehaviour
         if (isGrounded)
         {
             float desiredY = currentGroundY + rideHeight;
-            float lerpT    = Mathf.Clamp01(groundSnapStrength * Time.fixedDeltaTime);
+            float lerpT = Mathf.Clamp01(groundSnapStrength * Time.fixedDeltaTime);
             finalY = Mathf.Lerp(rb.position.y, desiredY, lerpT);
             finalY = Mathf.Clamp(finalY, desiredY - 0.8f, desiredY + 0.8f);
         }
@@ -1300,8 +1300,8 @@ public class TrafficVehicle : MonoBehaviour
     {
         if (!isGrounded || rb == null) return;
         float desiredY = currentGroundY + rideHeight;
-        float lerpT    = Mathf.Clamp01(groundSnapStrength * Time.fixedDeltaTime);
-        float newY     = Mathf.Lerp(rb.position.y, desiredY, lerpT);
+        float lerpT = Mathf.Clamp01(groundSnapStrength * Time.fixedDeltaTime);
+        float newY = Mathf.Lerp(rb.position.y, desiredY, lerpT);
         rb.MovePosition(new Vector3(rb.position.x, newY, rb.position.z));
     }
 
@@ -1314,8 +1314,8 @@ public class TrafficVehicle : MonoBehaviour
         if (wheelRadius <= 0.001f) return;
 
         float degreesPerMeter = 360f / (2f * Mathf.PI * wheelRadius);
-        float deltaDeg        = currentSpeed * Time.fixedDeltaTime * degreesPerMeter;
-        Quaternion spinDelta  = Quaternion.AngleAxis(deltaDeg, wheelSpinAxis);
+        float deltaDeg = currentSpeed * Time.fixedDeltaTime * degreesPerMeter;
+        Quaternion spinDelta = Quaternion.AngleAxis(deltaDeg, wheelSpinAxis);
 
         SpinWheel(wheelRL, spinDelta);
         SpinWheel(wheelRR, spinDelta);
@@ -1356,7 +1356,7 @@ public class TrafficVehicle : MonoBehaviour
     {
         if (_advancedThisFrame) return;
         _advancedThisFrame = true;
-        lastAdvanceTime    = Time.time;
+        lastAdvanceTime = Time.time;
         waypointIndex++;
 
         // Clear NavMesh recovery flag once we've passed the injected segment
@@ -1370,7 +1370,7 @@ public class TrafficVehicle : MonoBehaviour
         {
             Debug.Log($"[{gameObject.name}] ✅ Reached Node {destinationNodeID}");
             navSystem.ReleaseRoute(sourceNodeID, destinationNodeID);
-            sourceNodeID  = destinationNodeID;
+            sourceNodeID = destinationNodeID;
             currentNodeID = sourceNodeID;
             _inNavMeshRecovery = false;
             PickNewDestinationAndBuildRoute();
@@ -1378,7 +1378,7 @@ public class TrafficVehicle : MonoBehaviour
         }
 
         currentTarget = denseWaypoints[waypointIndex];
-        hasTarget     = true;
+        hasTarget = true;
     }
 
     // =========================================================================
@@ -1400,18 +1400,18 @@ public class TrafficVehicle : MonoBehaviour
             return;
         }
 
-        sourceNodeID       = result.sourceNodeID;
-        destinationNodeID  = result.destinationNodeID;
-        denseWaypoints     = result.waypoints;
-        waypointIndex      = 1;
+        sourceNodeID = result.sourceNodeID;
+        destinationNodeID = result.destinationNodeID;
+        denseWaypoints = result.waypoints;
+        waypointIndex = 1;
         pathRecalculations = 0;
         _inNavMeshRecovery = false;
 
-        hasTarget     = denseWaypoints.Count > 1;
+        hasTarget = denseWaypoints.Count > 1;
         currentTarget = hasTarget ? denseWaypoints[waypointIndex] : transform.position;
 
-        string routeStr     = $"{sourceNodeID}→{destinationNodeID}";
-        debugChainName      = routeStr;
+        string routeStr = $"{sourceNodeID}→{destinationNodeID}";
+        debugChainName = routeStr;
         debugTotalWaypoints = denseWaypoints.Count;
 
         Debug.Log($"[{gameObject.name}] ══ NEW ROUTE ══ {routeStr} | {denseWaypoints.Count} wps");
@@ -1538,9 +1538,9 @@ public class TrafficVehicle : MonoBehaviour
         for (int i = waypointIndex; i < denseWaypoints.Count; i++)
             spliced.Add(denseWaypoints[i]);
 
-        denseWaypoints     = spliced;
-        waypointIndex      = insertStart;  // start of recovery segment
-        _recoveryEndIndex  = insertEnd;
+        denseWaypoints = spliced;
+        waypointIndex = insertStart;  // start of recovery segment
+        _recoveryEndIndex = insertEnd;
         _inNavMeshRecovery = true;
 
         currentTarget = denseWaypoints.Count > waypointIndex
@@ -1555,18 +1555,18 @@ public class TrafficVehicle : MonoBehaviour
     private int FindNearestNodeLoS()
     {
         float best = float.MaxValue; int bestNode = -1;
-        int   mask = detectionLayerMask & ~groundLayer;
+        int mask = detectionLayerMask & ~groundLayer;
 
         foreach (var kvp in navSystem.nodeMap)
         {
             if (kvp.Value == null) continue;
             Vector3 npos = kvp.Value.transform.position;
-            float   dist = Vector3.Distance(transform.position, npos);
+            float dist = Vector3.Distance(transform.position, npos);
             if (dist > 60f) continue;
 
             Vector3 from = transform.position + Vector3.up * 1.5f;
-            Vector3 to   = npos + Vector3.up * 1f;
-            float   len  = Vector3.Distance(from, to);
+            Vector3 to = npos + Vector3.up * 1f;
+            float len = Vector3.Distance(from, to);
 
             if (!Physics.Raycast(from, (to - from).normalized, len, mask) && dist < best)
             { best = dist; bestNode = kvp.Key; }
@@ -1580,17 +1580,17 @@ public class TrafficVehicle : MonoBehaviour
 
     private void UpdateDebugInfo()
     {
-        debugCurrentWaypoint    = waypointIndex;
-        debugNextWaypointIndex  = Mathf.Min(waypointIndex + 1,
+        debugCurrentWaypoint = waypointIndex;
+        debugNextWaypointIndex = Mathf.Min(waypointIndex + 1,
                                             (denseWaypoints?.Count ?? 1) - 1);
-        debugCurrentNodeID      = currentNodeID;
-        debugTotalWaypoints     = denseWaypoints?.Count ?? 0;
-        debugCurrentSpeed       = currentSpeed;
-        debugProgressPct        = debugTotalWaypoints > 0
+        debugCurrentNodeID = currentNodeID;
+        debugTotalWaypoints = denseWaypoints?.Count ?? 0;
+        debugCurrentSpeed = currentSpeed;
+        debugProgressPct = debugTotalWaypoints > 0
             ? (float)waypointIndex / debugTotalWaypoints * 100f : 0f;
         debugDistanceToWaypoint = hasTarget
             ? Vector3.Distance(transform.position, currentTarget) : 0f;
-        debugTargetPosition     = currentTarget;
+        debugTargetPosition = currentTarget;
 
         if (navSystem != null && navSystem.nodeMap.ContainsKey(destinationNodeID))
             debugDistToDest = Vector3.Distance(transform.position,
@@ -1600,7 +1600,7 @@ public class TrafficVehicle : MonoBehaviour
         {
             debugNextNodeID = -1;
             Vector3 nwp = denseWaypoints[debugNextWaypointIndex];
-            float best  = 2f;
+            float best = 2f;
             foreach (var kvp in navSystem.nodeMap)
             {
                 if (kvp.Value == null) continue;
@@ -1725,13 +1725,13 @@ public class TrafficVehicle : MonoBehaviour
                 label,
                 new GUIStyle
                 {
-                    normal    = new GUIStyleState
+                    normal = new GUIStyleState
                     {
                         textColor = hit
                             ? new Color(0.15f, 0.95f, 0.35f)
-                            : new Color(1f,    0.3f,  0.3f)
+                            : new Color(1f, 0.3f, 0.3f)
                     },
-                    fontSize  = 9,
+                    fontSize = 9,
                     fontStyle = FontStyle.Bold
                 });
     }
@@ -1757,8 +1757,12 @@ public class TrafficVehicle : MonoBehaviour
             if (gizmoShowWaypointLabels)
                 UnityEditor.Handles.Label(_gizCentreOrigin + Vector3.up * 0.15f,
                     "CentreBody",
-                    new GUIStyle { normal = new GUIStyleState
-                        { textColor = new Color(1f, 0.8f, 0f) }, fontSize = 9 });
+                    new GUIStyle
+                    {
+                        normal = new GUIStyleState
+                        { textColor = new Color(1f, 0.8f, 0f) },
+                        fontSize = 9
+                    });
         }
         else
         {
@@ -1770,9 +1774,13 @@ public class TrafficVehicle : MonoBehaviour
             if (gizmoShowWaypointLabels)
                 UnityEditor.Handles.Label(_gizCentreOrigin + Vector3.up * 0.15f,
                     "AIRBORNE",
-                    new GUIStyle { normal = new GUIStyleState
-                        { textColor = Color.magenta }, fontSize = 9,
-                        fontStyle = FontStyle.Bold });
+                    new GUIStyle
+                    {
+                        normal = new GUIStyleState
+                        { textColor = Color.magenta },
+                        fontSize = 9,
+                        fontStyle = FontStyle.Bold
+                    });
         }
     }
 
@@ -1818,11 +1826,11 @@ public class TrafficVehicle : MonoBehaviour
                         _gizDetectOrigin + _gizDetectDir * _gizDetectRange);
 
         // Arrowhead at end of ray (small cross)
-        Vector3 tip    = _gizDetectOrigin + _gizDetectDir * _gizDetectRange;
-        Vector3 right  = Vector3.Cross(_gizDetectDir, Vector3.up).normalized * 0.3f;
-        Vector3 up     = Vector3.up * 0.3f;
+        Vector3 tip = _gizDetectOrigin + _gizDetectDir * _gizDetectRange;
+        Vector3 right = Vector3.Cross(_gizDetectDir, Vector3.up).normalized * 0.3f;
+        Vector3 up = Vector3.up * 0.3f;
         Gizmos.DrawLine(tip - right, tip + right);
-        Gizmos.DrawLine(tip - up,   tip + up);
+        Gizmos.DrawLine(tip - up, tip + up);
 
         // Stopping-distance indicator on the ray
         Vector3 stopPt = _gizDetectOrigin + _gizDetectDir * stopDist;
@@ -1831,8 +1839,12 @@ public class TrafficVehicle : MonoBehaviour
         if (gizmoShowWaypointLabels)
             UnityEditor.Handles.Label(stopPt + Vector3.up * 0.4f,
                 $"stop {stopDist:F1}m",
-                new GUIStyle { normal = new GUIStyleState
-                    { textColor = new Color(1f, 0.5f, 0.1f) }, fontSize = 8 });
+                new GUIStyle
+                {
+                    normal = new GUIStyleState
+                    { textColor = new Color(1f, 0.5f, 0.1f) },
+                    fontSize = 8
+                });
 
         // Hit-point diamond + distance text
         if (_gizDetectHit)
@@ -1848,8 +1860,8 @@ public class TrafficVehicle : MonoBehaviour
                     hitLabel,
                     new GUIStyle
                     {
-                        normal    = new GUIStyleState { textColor = hitColor },
-                        fontSize  = 10,
+                        normal = new GUIStyleState { textColor = hitColor },
+                        fontSize = 10,
                         fontStyle = FontStyle.Bold,
                     });
             }
@@ -1870,7 +1882,7 @@ public class TrafficVehicle : MonoBehaviour
             for (int i = waypointIndex; i < denseWaypoints.Count - 1; i++)
             {
                 bool isRecovery = _inNavMeshRecovery && i >= waypointIndex && i < _recoveryEndIndex;
-                float alpha     = Mathf.Lerp(0.7f, 0.2f,
+                float alpha = Mathf.Lerp(0.7f, 0.2f,
                                     (float)(i - waypointIndex) /
                                     Mathf.Max(1, denseWaypoints.Count - waypointIndex));
 
@@ -1879,7 +1891,7 @@ public class TrafficVehicle : MonoBehaviour
                 else
                     Gizmos.color = new Color(_gizmoColor.r, _gizmoColor.g, _gizmoColor.b, alpha);
 
-                Gizmos.DrawLine(denseWaypoints[i]     + Vector3.up * 0.3f,
+                Gizmos.DrawLine(denseWaypoints[i] + Vector3.up * 0.3f,
                                 denseWaypoints[i + 1] + Vector3.up * 0.3f);
             }
         }
@@ -1888,7 +1900,7 @@ public class TrafficVehicle : MonoBehaviour
         for (int i = 0; i < Mathf.Min(waypointIndex, denseWaypoints.Count - 1); i++)
         {
             Gizmos.color = new Color(0.4f, 0.4f, 0.4f, 0.18f);
-            Gizmos.DrawLine(denseWaypoints[i]     + Vector3.up * 0.25f,
+            Gizmos.DrawLine(denseWaypoints[i] + Vector3.up * 0.25f,
                             denseWaypoints[i + 1] + Vector3.up * 0.25f);
         }
 
@@ -1938,9 +1950,9 @@ public class TrafficVehicle : MonoBehaviour
             int idx = waypointIndex + n;
             if (idx >= denseWaypoints.Count) break;
 
-            Vector3 wp  = denseWaypoints[idx] + Vector3.up * 0.3f;
-            Color   col = upcomingColors[n - 1];
-            float   rad = sphereRadii[n - 1];
+            Vector3 wp = denseWaypoints[idx] + Vector3.up * 0.3f;
+            Color col = upcomingColors[n - 1];
+            float rad = sphereRadii[n - 1];
 
             // Solid + wire sphere
             Gizmos.color = col;
@@ -2019,7 +2031,7 @@ public class TrafficVehicle : MonoBehaviour
                     Gizmos.color = _hitDistance < vehicleStoppingDistance
                                      ? Color.red : Color.yellow; break;
                 case HitType.TrafficLight: Gizmos.color = Color.cyan; break;
-                default:                   Gizmos.color = Color.red;  break;
+                default: Gizmos.color = Color.red; break;
             }
             Gizmos.DrawWireSphere(_hitObject.transform.position + Vector3.up * 0.5f, 0.35f);
         }
@@ -2057,8 +2069,8 @@ public class TrafficVehicle : MonoBehaviour
             $"Recalcs: {pathRecalculations}/{maxPathRecalculations}",
             new GUIStyle
             {
-                normal    = new GUIStyleState { textColor = Color.white },
-                fontSize  = 11,
+                normal = new GUIStyleState { textColor = Color.white },
+                fontSize = 11,
                 fontStyle = FontStyle.Bold,
             });
     }
@@ -2084,7 +2096,7 @@ public class TrafficVehicle : MonoBehaviour
     /// Draws a 3-axis diamond (octahedron cross) at 'pos' for hit-point markers.
     private static void DrawDiamond(Vector3 pos, float size)
     {
-        Gizmos.DrawLine(pos + Vector3.up    * size, pos - Vector3.up    * size);
+        Gizmos.DrawLine(pos + Vector3.up * size, pos - Vector3.up * size);
         Gizmos.DrawLine(pos + Vector3.right * size, pos - Vector3.right * size);
         Gizmos.DrawLine(pos + Vector3.forward * size, pos - Vector3.forward * size);
     }
@@ -2096,8 +2108,8 @@ public class TrafficVehicle : MonoBehaviour
         UnityEditor.Handles.Label(pos, text,
             new GUIStyle
             {
-                normal    = new GUIStyleState { textColor = col },
-                fontSize  = fontSize,
+                normal = new GUIStyleState { textColor = col },
+                fontSize = fontSize,
                 fontStyle = bold ? FontStyle.Bold : FontStyle.Normal,
             });
     }
