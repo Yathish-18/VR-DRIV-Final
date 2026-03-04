@@ -1,5 +1,5 @@
 ﻿// ============================================================================
-//  TRAFFIC VEHICLE  ·  v5.3  —  FULL SCENE GIZMOS
+//  TRAFFIC VEHICLE  ·  v5.5  —  GRADUAL BRAKING (no more crash-then-stop)
 //
 //  NEW vs v5.2:
 //  ─────────────────────────────────────────────────────────────────────────
@@ -368,6 +368,7 @@ public class TrafficVehicle : MonoBehaviour
     [SerializeField] private string  debugGroundSource        = "None";
     [SerializeField] private int     debugWheelHits           = 0;
     [SerializeField] private bool    debugInNavMeshRecovery   = false;
+    [SerializeField] private float   debugSpeedMult           = 1f;  // 0=stopped, 1=full speed
 
     private Color _gizmoColor = Color.green;
 
@@ -582,19 +583,25 @@ public class TrafficVehicle : MonoBehaviour
          && Time.time - lastAdvanceTime >= minAdvanceInterval)
             AdvanceWaypoint();
 
-        // ── Speed ─────────────────────────────────────────────────────────────
-        bool shouldStop = ShouldStop();
-        isStopped = shouldStop;
+        // ── Speed  (v5.5 — gradual braking, no more binary stop/crash) ──────────
+        // ComputeSpeedMultiplier() returns 0..1:
+        //   1.0  = full speed          (no obstacle, green light)
+        //   0..1 = slowing down        (obstacle in brake zone)
+        //   0.0  = full stop           (inside stopping distance / red light)
+        // This means the car BLEEDS off speed proportionally as it approaches
+        // an obstacle, instead of jamming from full speed to zero at one frame.
+        float speedMult = ComputeSpeedMultiplier();
+        isStopped = speedMult < 0.05f;
 
         float slopeFactor = 1f;
-        if (!shouldStop && isGrounded && debugSlopeAngle > 5f)
+        if (speedMult > 0f && isGrounded && debugSlopeAngle > 5f)
         {
             float yDiff = currentTarget.y - transform.position.y;
             if (yDiff > 0.5f)
                 slopeFactor = Mathf.Lerp(1f, 0.72f, Mathf.Clamp01(debugSlopeAngle / 35f));
         }
 
-        targetSpeed  = shouldStop ? 0f : maxSpeed * slopeFactor;
+        targetSpeed  = maxSpeed * slopeFactor * speedMult;
         currentSpeed = Mathf.SmoothDamp(currentSpeed, targetSpeed,
                                         ref speedSmoothVelocity, speedSmoothTime);
 
@@ -602,7 +609,7 @@ public class TrafficVehicle : MonoBehaviour
         UpdateWheelVisuals();
 
         // ── Stuck detection ───────────────────────────────────────────────────
-        if (!shouldStop)
+        if (!isStopped)
         {
             stuckCounter++;
 
@@ -629,8 +636,8 @@ public class TrafficVehicle : MonoBehaviour
             isStuck           = debugIsStuck = false;
             lastValidPosition = transform.position;
         }
-
         debugInNavMeshRecovery = _inNavMeshRecovery;
+        debugSpeedMult         = debugSpeedMultiplier;
         UpdateDebugInfo();
     }
 
@@ -815,6 +822,45 @@ public class TrafficVehicle : MonoBehaviour
     //  DETECTION
     // =========================================================================
 
+    // =========================================================================
+    //  DETECTION
+    //
+    //  v5.4 fixes:
+    //  ─────────────────────────────────────────────────────────────────────────
+    //  FIX A — Traffic light on roadside never hit by forward ray
+    //    ROOT CAUSE: The NPC ray travels down the road centre. Traffic lights
+    //    are mounted on the roadside 3–8 m away, so the ray never hits their
+    //    collider → _currentLight stays null → car never stops.
+    //    FIX: ScanNearbyTrafficLights() runs an OverlapSphere every frame
+    //    independently of the forward ray. It finds any traffic light within
+    //    trafficLightScanRadius (default 18 m) that is also in front of the
+    //    car (dot > 0). The nearest qualifying red/yellow light is stored in
+    //    _currentLight. This works regardless of where the light pole is.
+    //
+    //  FIX B — Thin forward ray misses vehicles that are offset or turning
+    //    ROOT CAUSE: Physics.RaycastAll fires a zero-radius ray. A vehicle
+    //    that is 1 m to the side, at an angle, or mid-turn is simply not
+    //    intersected → NPC ploughs into it without stopping.
+    //    FIX: Replace RaycastAll with SphereCastAll (radius 1.2 m). This
+    //    covers the full lane width and catches any vehicle in the NPC's path.
+    //
+    //  FIX C — NPC hits player and keeps going
+    //    ROOT CAUSE: ShouldStopForVehicle() checked ahead.isStopped, but
+    //    the player vehicle has no TrafficVehicle component so 'ahead' was
+    //    null → fell through to the distance check, which uses the CENTRE of
+    //    the hit vehicle. By the time the distance was < vehicleStoppingDistance
+    //    the bumpers had already met.
+    //    FIX: Any playerVehicle hit within vehicleStoppingDistance * 1.2 f
+    //    immediately returns true (stop), no component check required.
+    // =========================================================================
+
+    // Radius for OverlapSphere traffic-light proximity scan.
+    // Covers the roadside light even when the ray travels the road centre.
+    [Header("═══  TRAFFIC LIGHT PROXIMITY  ═══")]
+    [Tooltip("OverlapSphere radius used to find roadside traffic lights.\n" +
+             "Set to intersection approach distance. 15–25 m typical.")]
+    [SerializeField] private float trafficLightScanRadius = 18f;
+
     private void RunDetection()
     {
         _hitType     = HitType.None;
@@ -833,33 +879,28 @@ public class TrafficVehicle : MonoBehaviour
         _gizDetectRange  = detectionRange;
         _gizDetectHit    = false;
 
-        RaycastHit[] hits = Physics.RaycastAll(origin, forward, detectionRange,
-                                               detectionLayerMask);
+        // ── Step 1: Proximity scan for roadside traffic lights ────────────────
+        // Runs BEFORE the forward ray so _currentLight is always up to date.
+        // The ray can never see a light mounted 5 m to the side of the road.
+        ScanNearbyTrafficLights(origin, forward);
+
+        // ── Step 2: SphereCast for vehicles / obstacles ───────────────────────
+        // Radius 1.2 m covers a full lane width so offset or turning vehicles
+        // are caught before the bumpers touch.
+        const float castRadius = 1.2f;
+        RaycastHit[] hits = Physics.SphereCastAll(
+            origin, castRadius, forward, detectionRange, detectionLayerMask);
         System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
 
         foreach (RaycastHit hit in hits)
         {
+            if (hit.collider == null) continue;
             if (hit.collider.transform.IsChildOf(transform)) continue;
+
             int layerBit = 1 << hit.collider.gameObject.layer;
 
-            if ((layerBit & trafficLightLayer) != 0)
-            {
-                TrafficLightController tlc =
-                    hit.collider.GetComponentInParent<TrafficLightController>();
-                if (tlc != null) _currentLight = tlc;
-
-                if (_currentLight != null &&
-                    _currentLight.currentState != TrafficLightController.LightState.Green &&
-                    _hitType == HitType.None)
-                {
-                    _hitType          = HitType.TrafficLight;
-                    _hitDistance      = hit.distance;
-                    _hitObject        = hit.collider.gameObject;
-                    _gizDetectHit     = true;
-                    _gizDetectHitPt   = hit.point;
-                }
-                continue;
-            }
+            // Skip traffic-light colliders — handled by proximity scan above
+            if ((layerBit & trafficLightLayer) != 0) continue;
 
             HitType type;
             if      ((layerBit & npcVehicleLayer)    != 0) type = HitType.NpcVehicle;
@@ -874,8 +915,20 @@ public class TrafficVehicle : MonoBehaviour
             break;
         }
 
-        if (_hitType == HitType.None || _hitType == HitType.TrafficLight)
-            TryClearStaleLight();
+        // If sphere cast found nothing, traffic-light proximity scan may
+        // already have set _currentLight → report TrafficLight as hit type
+        // so ShouldStop() routes to ShouldStopForLight().
+        if (_hitType == HitType.None && _currentLight != null &&
+            _currentLight.currentState != TrafficLightController.LightState.Green)
+        {
+            float dist = Vector3.Distance(transform.position, _currentLight.transform.position);
+            if (dist <= trafficLightStopDistance)
+            {
+                _hitType     = HitType.TrafficLight;
+                _hitDistance = dist;
+                _hitObject   = _currentLight.gameObject;
+            }
+        }
 
         if (showDebugGizmos || showDebugRays)
         {
@@ -901,11 +954,71 @@ public class TrafficVehicle : MonoBehaviour
                                    _hitType == HitType.PlayerVehicle);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  TRAFFIC LIGHT PROXIMITY SCAN
+    //
+    //  Uses OverlapSphere so it finds lights mounted on the roadside even when
+    //  they are never in the path of the forward detection ray.
+    //
+    //  Qualifying light:
+    //    • On the trafficLightLayer
+    //    • Within trafficLightScanRadius metres
+    //    • In front of the car  (dot product with forward > -0.2)
+    //    • Nearest one wins (so we respond to the light for THIS intersection)
+    //
+    //  If the nearest qualifying light is Red or Yellow → _currentLight = that
+    //  light and the stop logic in ShouldStopForLight() takes over.
+    //  If it is Green → _currentLight cleared so the car keeps moving.
+    // ─────────────────────────────────────────────────────────────────────────
+    private void ScanNearbyTrafficLights(Vector3 origin, Vector3 forward)
+    {
+        Collider[] nearby = Physics.OverlapSphere(origin, trafficLightScanRadius,
+                                                  trafficLightLayer);
+        if (nearby.Length == 0)
+        {
+            TryClearStaleLight();
+            return;
+        }
+
+        TrafficLightController bestLight    = null;
+        float                  bestDist     = float.MaxValue;
+
+        foreach (Collider col in nearby)
+        {
+            // Must be in front of the car (not behind us)
+            Vector3 toLight = (col.transform.position - transform.position);
+            float   dot     = Vector3.Dot(forward, toLight.normalized);
+            if (dot < -0.2f) continue;   // behind or far to the side — ignore
+
+            TrafficLightController tlc = col.GetComponentInParent<TrafficLightController>();
+            if (tlc == null) continue;
+
+            float dist = toLight.magnitude;
+            if (dist < bestDist)
+            {
+                bestDist  = dist;
+                bestLight = tlc;
+            }
+        }
+
+        if (bestLight == null)
+        {
+            TryClearStaleLight();
+            return;
+        }
+
+        _currentLight = bestLight;
+
+        // If the nearest light is green, clear the stopped state
+        if (_currentLight.currentState == TrafficLightController.LightState.Green)
+            _stoppedAtRed = false;
+    }
+
     private void TryClearStaleLight()
     {
         if (_currentLight == null) return;
         if (Vector3.Distance(transform.position,
-                             _currentLight.transform.position) > detectionRange * 1.5f)
+                             _currentLight.transform.position) > trafficLightScanRadius * 1.4f)
         {
             _currentLight = null;
             _stoppedAtRed = false;
@@ -913,64 +1026,173 @@ public class TrafficVehicle : MonoBehaviour
     }
 
     // =========================================================================
-    //  STOP DECISION
+    //  SPEED MULTIPLIER  (v5.5 — replaces binary ShouldStop)
+    //
+    //  Returns a value 0..1 that scales maxSpeed:
+    //    1.0  = full speed             (no obstacle, green light)
+    //    0..1 = proportional braking   (obstacle inside brake zone)
+    //    0.0  = full stop              (inside hard-stop distance / red)
+    //
+    //  BRAKE ZONE DISTANCES (tunable in Inspector):
+    //    vehicleBrakeStartMult   × vehicleStoppingDistance = where car starts slowing
+    //    lightBrakeStartMult     × trafficLightStopDistance = where car starts slowing
+    //
+    //  WHY THIS FIXES "crashes then stops":
+    //    Old code: targetSpeed = 0 the moment the obstacle entered
+    //    vehicleStoppingDistance. At 15 m/s + 0.3s smooth time the car
+    //    still travels ~3 m before physics catches up — right into the bumper.
+    //    New code: the car starts slowing 2–3x before the hard-stop line,
+    //    arriving at it with near-zero speed.
     // =========================================================================
 
-    private bool ShouldStop()
+    [Header("═══  BRAKING ZONES  ═══")]
+    [Tooltip("Car begins slowing this many times vehicleStoppingDistance ahead of an obstacle.\n" +
+             "2.0–3.0 is a smooth, realistic brake ramp.")]
+    [SerializeField] private float vehicleBrakeStartMult = 2.5f;
+
+    [Tooltip("Car begins slowing this many times trafficLightStopDistance ahead of the stop line.\n" +
+             "2.5–4.0 gives a comfortable deceleration into intersections.")]
+    [SerializeField] private float lightBrakeStartMult = 3f;
+
+    // Cached for the debug overlay
+    [SerializeField] private float debugSpeedMultiplier = 1f;
+
+    private float ComputeSpeedMultiplier()
     {
+        // ── Traffic light — highest priority ─────────────────────────────────
+        // Runs before vehicle check so a red light always overrides everything.
+        if (_currentLight != null)
+        {
+            var state = _currentLight.currentState;
+
+            if (state != TrafficLightController.LightState.Green)
+            {
+                // Update stopped-at-red bookkeeping
+                float mult = GetLightSpeedMultiplier(state);
+                debugSpeedMultiplier = mult;
+                return mult;
+            }
+            else
+            {
+                _stoppedAtRed = false;
+            }
+        }
+
+        // ── Vehicle / obstacle ahead ──────────────────────────────────────────
         switch (_hitType)
         {
             case HitType.NpcVehicle:
-            case HitType.PlayerVehicle: return ShouldStopForVehicle();
-            case HitType.Obstacle:      return _hitDistance < obstacleStoppingDistance;
-            case HitType.TrafficLight:  return ShouldStopForLight();
+            case HitType.PlayerVehicle:
+            {
+                float mult = GetVehicleSpeedMultiplier();
+                debugSpeedMultiplier = mult;
+                return mult;
+            }
+            case HitType.Obstacle:
+            {
+                float hard      = obstacleStoppingDistance;
+                float brakeEnd  = hard;
+                float brakeStart = hard * vehicleBrakeStartMult;
+                float mult = _hitDistance <= brakeEnd
+                    ? 0f
+                    : _hitDistance <= brakeStart
+                        ? Mathf.Clamp01((_hitDistance - brakeEnd) / (brakeStart - brakeEnd))
+                        : 1f;
+                debugSpeedMultiplier = mult;
+                return mult;
+            }
             default:
-                if (_currentLight != null &&
-                    _currentLight.currentState == TrafficLightController.LightState.Green)
-                    _stoppedAtRed = false;
-                return false;
+                debugSpeedMultiplier = 1f;
+                return 1f;
         }
     }
 
-    private bool ShouldStopForVehicle()
+    // ── Proportional brake ramp toward a vehicle ahead ────────────────────────
+    private float GetVehicleSpeedMultiplier()
     {
-        if (_hitDistance > vehicleStoppingDistance) return false;
+        float hard       = vehicleStoppingDistance;
+        float brakeStart = hard * vehicleBrakeStartMult;
+
+        // Player vehicle — always stop, no TrafficVehicle component needed
+        if (_hitType == HitType.PlayerVehicle)
+        {
+            if (_hitDistance <= hard)       return 0f;
+            if (_hitDistance <= brakeStart) return Ramp(_hitDistance, hard, brakeStart);
+            return 1f;
+        }
+
+        // NPC vehicle — peek at the car ahead's state
         if (_hitType == HitType.NpcVehicle && _hitObject != null)
         {
             TrafficVehicle ahead = _hitObject.transform.root.GetComponent<TrafficVehicle>()
                                 ?? _hitObject.GetComponentInParent<TrafficVehicle>();
             if (ahead != null)
             {
-                if (_hitDistance < vehicleStoppingDistance * 0.6f) return true;
-                return ahead.isStopped || ahead.currentSpeed < 1f;
+                // Emergency zone (bumpers almost touching): always hard-stop
+                if (_hitDistance <= hard * 0.5f) return 0f;
+
+                if (ahead.isStopped || ahead.currentSpeed < 0.5f)
+                {
+                    // The car ahead is stopped → ramp down to 0 at stopDist
+                    if (_hitDistance <= hard)       return 0f;
+                    if (_hitDistance <= brakeStart) return Ramp(_hitDistance, hard, brakeStart);
+                    return 1f;
+                }
+                else
+                {
+                    // The car ahead is moving — only slow when very close
+                    if (_hitDistance <= hard)       return Mathf.Max(0.1f, ahead.currentSpeed / maxSpeed);
+                    if (_hitDistance <= brakeStart * 0.5f)
+                        return Ramp(_hitDistance, hard, brakeStart * 0.5f);
+                    return 1f;
+                }
             }
         }
-        return true;
+
+        // Generic vehicle-layer obstacle
+        if (_hitDistance <= hard)       return 0f;
+        if (_hitDistance <= brakeStart) return Ramp(_hitDistance, hard, brakeStart);
+        return 1f;
     }
 
-    private bool ShouldStopForLight()
+    // ── Proportional brake ramp toward a red / yellow light ───────────────────
+    private float GetLightSpeedMultiplier(TrafficLightController.LightState state)
     {
-        if (_currentLight == null) return false;
-        var state = _currentLight.currentState;
+        if (_currentLight == null) return 1f;
 
-        if (state == TrafficLightController.LightState.Green)
-        { _stoppedAtRed = false; return false; }
-
+        // Red-light timeout (driver impatience after maxRedLightWaitTime)
         if (_stoppedAtRed && Time.time - _redLightEntryTime > maxRedLightWaitTime)
         {
             _stoppedAtRed = false;
             Debug.LogWarning($"[{gameObject.name}] Red-light timeout — proceeding.");
-            return false;
+            return 1f;
         }
 
-        bool inStopZone = _hitDistance < trafficLightStopDistance;
-        if (state == TrafficLightController.LightState.Yellow && !inStopZone) return false;
+        float distToLight = Vector3.Distance(transform.position, _currentLight.transform.position);
+        float hard        = trafficLightStopDistance;
+        float brakeStart  = hard * lightBrakeStartMult;
 
-        if (!_stoppedAtRed && inStopZone)
-        { _stoppedAtRed = true; _redLightEntryTime = Time.time; }
+        // Yellow light: only brake when inside the braking zone
+        if (state == TrafficLightController.LightState.Yellow && distToLight > brakeStart)
+            return 1f;
 
-        return _stoppedAtRed || inStopZone;
+        // Commit to stop once inside the hard zone
+        if (distToLight <= hard)
+        {
+            if (!_stoppedAtRed) { _stoppedAtRed = true; _redLightEntryTime = Time.time; }
+            return 0f;
+        }
+
+        // Brake zone: smoothly reduce speed toward the stop line
+        if (distToLight <= brakeStart)
+            return Ramp(distToLight, hard, brakeStart);
+
+        return 1f;
     }
+
+    // Linear ramp: 0 at 'lo', 1 at 'hi'
+    private static float Ramp(float v, float lo, float hi) =>
+        Mathf.Clamp01((v - lo) / Mathf.Max(0.01f, hi - lo));
 
     // =========================================================================
     //  MOVE VEHICLE
@@ -1814,14 +2036,18 @@ public class TrafficVehicle : MonoBehaviour
         if (_inNavMeshRecovery) status += " [NM-RECOVERY]";
         string detail = _hitType != HitType.None ? $" [{_hitType} @ {debugHitDist:F1}m]" : "";
         if (_stoppedAtRed) detail = " [RED LIGHT]";
+        string brakeInfo = debugSpeedMultiplier < 0.99f
+            ? $"  BRAKING {debugSpeedMultiplier:F2}×"
+            : "";
 
         UnityEditor.Handles.Label(
             transform.position + Vector3.up * 6f,
-            $"{gameObject.name}  {status}{detail}\n" +
+            $"{gameObject.name}  {status}{detail}{brakeInfo}\n" +
             $"Route: {sourceNodeID} → {destinationNodeID}\n" +
             $"WP: {debugCurrentWaypoint}/{debugTotalWaypoints}  ({debugProgressPct:F0}%)\n" +
             $"Dist to dest: {debugDistToDest:F1} m\n" +
-            $"Speed: {debugCurrentSpeed:F1} m/s  ({debugCurrentSpeed * 3.6f:F0} km/h)\n" +
+            $"Speed: {debugCurrentSpeed:F1} m/s  ({debugCurrentSpeed * 3.6f:F0} km/h)  " +
+            $"Mult: {debugSpeedMultiplier:F2}\n" +
             $"Steer: {currentSteerAngle:F1}°\n" +
             $"Detection: {debugHitType}  @ {debugHitDist:F1} m\n" +
             $"Light: {debugLightState}\n" +
