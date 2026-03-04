@@ -1,64 +1,167 @@
-using UnityEngine;
-using System.Collections.Generic;
-using NWH.VehiclePhysics2;
+// ============================================================================
+//  CENTRALIZED CAR CONTROLLER  v3.2  —  PLAYER ROUTE VISUALIZATION ONLY
+//  ============================================================================
+//  PURPOSE:
+//    Draws the player car's planned route on screen as a line renderer.
+//    Also tracks brake reaction time for research/scoring purposes.
+//    That is ALL this script does.
+//
+//  DOES NOT:
+//    ✗ Touch any Rigidbody  (no velocity, forces, or constraints — ever)
+//    ✗ Move the car
+//    ✗ Handle input
+//    ✗ Compete with VehicleController (NWH VehiclePhysics2)
+//
+//  v3.2 — SMART REROUTE WITH TWO MODES  (enum RerouteMode)
+//  ─────────────────────────────────────────────────────────────────────────
+//  Route is always built ONCE to FixedDestNodeID.
+//  Each refresh tick:
+//    1. TrimPassedWaypoints() — moves the start pointer forward. Zero flicker.
+//    2. Deviation check using the chosen RerouteMode.
+//    3. If deviated → rebuild to the SAME fixed destination (no line flip).
+//
+//  RerouteMode.AdaptiveThreshold
+//    Distance from player to nearest remaining waypoint vs a threshold that
+//    scales with local node spacing:
+//      sparse nodes (40 m gap) → threshold up to 20 m → no false reroutes
+//      dense nodes  ( 4 m gap) → threshold down to 5 m → catches wrong turns
+//    No NavMesh calls at runtime. Pure waypoint math.
+//
+//  RerouteMode.NavMeshComparison
+//    NavMesh.CalculatePath(currentPos → fixedDest) each tick.
+//    Compares fresh path length vs remaining original path length.
+//      fresh ≈ remaining          → on route → trim only
+//      fresh > remaining × 1.3   → wrong way  → reroute
+//    Geometry-aware. Works regardless of node density.
+//    U-turns, dead ends, wrong turns all caught immediately.
+//
+//  HISTORY:
+//    v3.0 — removed all Rigidbody writes
+//    v3.1 — added autoUpdateRoute lock + FixedDestNodeID
+//    v3.2 — TrimPassedWaypoints + AdaptiveThreshold + NavMeshComparison
+// ============================================================================
 
+using UnityEngine;
+using UnityEngine.AI;
+using System.Collections.Generic;
+
+[DisallowMultipleComponent]
 public class CentralizedCarController : MonoBehaviour
 {
-    public CentralizedNavigationSystem navSystem;
-    public NavNode targetNode;
-    public bool autoFindPath = false;
-    public bool followPath = true;
-    public bool showDebugLogs = false;
+    // =========================================================================
+    //  ENUM
+    // =========================================================================
 
-    [Header("Driving")]
-    public float moveSpeed = 5f;
-    public float rotationSpeed = 2f;
-
-    [Header("Dynamic Route Update")]
-    public bool autoUpdateRoute = true;
-    public float routeUpdateInterval = 3f;
-    public float offRouteThreshold = 20f;
-
-    [Header("Car Ahead Raycast (Brake Reaction Time)")]
-    [Tooltip("Raycast distance = max range AND threshold. If car detected within this distance, measure brake reaction time.")]
-    public float raycastDistance = 50f;
-    public float raycastHeightOffset = 0.5f;
-    [Tooltip("LayerMask recommended: assign vehicles to a 'Vehicle' layer so raycast only hits cars.")]
-    public LayerMask vehicleRaycastLayerMask = -1;
-    [Tooltip("Optional: NWH VehicleController for brake input. If null, uses keyboard (S=brake).")]
-    public VehicleController vehicleControllerForInput;
-
-    [Header("Debug Gizmos")]
-    public bool showDebugGizmos = true;
-
-    private List<int> currentPath = new List<int>();
-    private int currentWaypointIndex = 0;
-    private Rigidbody rb;
-    private float routeUpdateTimer = 0f;
-    private int lastClosestNodeID = -1;
-
-    // Car-ahead brake reaction time (stored here; data provider reads from this)
-    private const int MaxReactionEvents = 50;
-    private List<float> _reactionTimesSec = new List<float>();
-    private float _carAheadDetectedTime = -1f;
-    private float _sessionStartTime;
-
-    // FIX #2: prevents brake-held spam after a reaction is recorded
-    private bool _waitingForBrakeRelease = false;
-
-    void Awake()
+    public enum RerouteMode
     {
-        rb = GetComponent<Rigidbody>();
-        if (rb == null)
-        {
-            rb = gameObject.AddComponent<Rigidbody>();
-            rb.mass = 1000f;
-            rb.constraints = RigidbodyConstraints.FreezeRotationX |
-                             RigidbodyConstraints.FreezeRotationZ;
-        }
+        AdaptiveThreshold,   // Pre-baked waypoint spacing. No NavMesh calls.
+        NavMeshComparison    // NavMesh.CalculatePath each tick. Geometry-aware.
     }
 
-    void Start()
+    // =========================================================================
+    //  INSPECTOR
+    // =========================================================================
+
+    [Header("═══  NAVIGATION SYSTEM  ═══")]
+    [Tooltip("Reference to CentralizedNavigationSystem. Auto-found if null.")]
+    public CentralizedNavigationSystem navSystem;
+
+    [Header("═══  FIXED DESTINATION  ═══")]
+    [Tooltip("Drag a NavNode from the scene here.\n" +
+             "The route will always drive toward this node.\n" +
+             "Leave empty to use random destination (original behaviour).")]
+    public NavNode fixedDestinationNode = null;
+
+    // Convenience getter — resolves the node ID from the dragged reference.
+    private int FixedDestNodeID =>
+        fixedDestinationNode != null ? fixedDestinationNode.nodeID : -1;
+
+    [Header("═══  ROUTE VISUALIZATION  ═══")]
+    [Tooltip("Draw the player car's planned route as a line in the scene.")]
+    public bool showRouteVisualization = true;
+
+    [Tooltip("How often (seconds) the trim + deviation check runs.")]
+    [Range(0.1f, 3f)]
+    public float routeRefreshInterval = 0.5f;
+
+    [Header("═══  REROUTE MODE  ═══")]
+    [Tooltip("AdaptiveThreshold — uses local waypoint spacing. No NavMesh calls at runtime.\n" +
+             "NavMeshComparison — uses NavMesh.CalculatePath. Geometry-aware, handles any node density.")]
+    public RerouteMode rerouteMode = RerouteMode.NavMeshComparison;
+
+    [Header("  AdaptiveThreshold Settings")]
+    [Tooltip("Threshold = local waypoint spacing × this. 0.5 = half the cell size.")]
+    [Range(0.2f, 1f)]
+    public float adaptiveThresholdMultiplier = 0.5f;
+
+    [Tooltip("Minimum allowed threshold in metres (protects against micro-nodes).")]
+    [Range(3f, 15f)]
+    public float minDeviationThreshold = 5f;
+
+    [Tooltip("Maximum allowed threshold in metres (protects against massive sparse gaps).")]
+    [Range(15f, 60f)]
+    public float maxDeviationThreshold = 30f;
+
+    [Header("  NavMeshComparison Settings")]
+    [Tooltip("Reroute when fresh NavMesh path length > remaining length × this.\n" +
+             "1.3 = 30% longer = player went wrong way.")]
+    [Range(1.1f, 2f)]
+    public float navMeshLengthRatio = 1.3f;
+
+    [Tooltip("NavMesh area mask for path calculation.")]
+    public int navMeshAreaMask = NavMesh.AllAreas;
+
+    [Header("═══  DEBUG (read-only)  ═══")]
+    [SerializeField] private float  dbgDistToPath       = 0f;
+    [SerializeField] private float  dbgAdaptiveThresh   = 0f;
+    [SerializeField] private float  dbgRemainingLen     = 0f;
+    [SerializeField] private float  dbgNavMeshLen       = 0f;
+    [SerializeField] private bool   dbgRerouteTriggered = false;
+    [SerializeField] private int    dbgWaypointIndex    = 0;
+    [SerializeField] private int    dbgTotalWaypoints   = 0;
+
+    [Header("═══  FOLLOW PATH  (Test / Debug Only)  ═══")]
+    [Tooltip("FOR TESTING ONLY — cannot fight VehicleController.")]
+    public bool  followPath               = false;
+    [Range(1f, 30f)] public float testFollowSpeed           = 10f;
+    [Range(1f, 10f)] public float testTurnSpeed             = 4f;
+    [Range(1f, 10f)] public float testWaypointReachDistance = 4f;
+
+    [Header("═══  BRAKE REACTION  (Research / Scoring)  ═══")]
+    public LayerMask obstacleDetectionLayer;
+    [Range(5f, 60f)] public float reactionRayDistance = 20f;
+
+    // =========================================================================
+    //  PRIVATE STATE
+    // =========================================================================
+
+    private List<Vector3> _currentWaypoints  = new List<Vector3>();
+    private List<int>     _currentNodePath   = new List<int>();
+    private int           _waypointIndex     = 0;
+    private int           _currentSourceNode = -1;
+    private int           _currentDestNode   = -1;
+    private float         _routeRefreshTimer = 0f;
+    private bool          _hasBuiltInitialRoute = false;
+
+    private int   _lastClosestNode       = -1;
+    private float _closestNodeCacheTimer = 0f;
+    private const float CLOSEST_NODE_CACHE_HZ = 0.25f;
+
+    private bool  _obstacleLastFrame     = false;
+    private float _obstacleFirstSeenTime = -1f;
+    private bool  _reactionFired         = false;
+    private float _lastReactionTime      = -1f;
+    private float _reactionTimeSum       = 0f;
+    private int   _reactionTimeCount     = 0;
+    private float _worstReactionTime     = -1f;
+
+    private Rigidbody _rb;   // read-only, never written
+
+    // =========================================================================
+    //  LIFECYCLE
+    // =========================================================================
+
+    private void Start()
     {
         if (navSystem == null)
         {
@@ -67,356 +170,420 @@ public class CentralizedCarController : MonoBehaviour
 #else
             navSystem = Object.FindObjectOfType<CentralizedNavigationSystem>();
 #endif
-        }
-
-        if (showDebugLogs)
-            Debug.Log($"[Car] Start. navSystem={(navSystem != null)}, targetNode={(targetNode != null)}");
-
-        if (autoFindPath && targetNode != null)
-            FindAndFollowPath();
-
-        _sessionStartTime = Time.time;
-    }
-
-    void Update()
-    {
-        DoCarAheadRaycastAndReaction();
-
-        if (Input.GetKeyDown(KeyCode.Space))
-        {
-            if (showDebugLogs) Debug.Log("[Car] Space pressed – recalculating path");
-            FindAndFollowPath();
-        }
-
-        if (autoUpdateRoute && targetNode != null && navSystem != null)
-        {
-            routeUpdateTimer += Time.deltaTime;
-
-            if (routeUpdateTimer >= routeUpdateInterval)
+            if (navSystem == null)
             {
-                if (showDebugLogs) Debug.Log("[Car] Periodic route update triggered");
-                FindAndFollowPath();
-                routeUpdateTimer = 0f;
-            }
-        }
-
-        if (!followPath) return;
-        if (navSystem == null || rb == null || currentPath == null) return;
-        if (currentPath.Count == 0 || currentWaypointIndex >= currentPath.Count) return;
-
-        int nodeId = currentPath[currentWaypointIndex];
-        if (!navSystem.nodeMap.ContainsKey(nodeId))
-        {
-            if (showDebugLogs) Debug.LogWarning($"[Car] nodeMap does not contain ID {nodeId}");
-            return;
-        }
-
-        NavNode target = navSystem.nodeMap[nodeId];
-        if (target == null)
-        {
-            if (showDebugLogs) Debug.LogWarning($"[Car] target NavNode for ID {nodeId} is null");
-            return;
-        }
-
-        Vector3 direction = target.worldPosition - transform.position;
-        direction.y = 0f;
-        float dist = direction.magnitude;
-
-        if (dist > 0.2f)
-        {
-            direction.Normalize();
-            Quaternion targetRotation = Quaternion.LookRotation(direction);
-            transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, rotationSpeed * Time.deltaTime);
-            rb.linearVelocity = transform.forward * moveSpeed;
-        }
-        else
-        {
-            if (showDebugLogs) Debug.Log($"[Car] Reached path node {nodeId} (index {currentWaypointIndex})");
-            currentWaypointIndex++;
-            if (currentWaypointIndex >= currentPath.Count)
-            {
-                if (showDebugLogs) Debug.Log("[Car] Reached final destination node – path complete");
-                currentPath.Clear();
-                navSystem.ClearPathVisualization();
-                rb.linearVelocity = Vector3.zero;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Raycast detects car in front. Accepts BOTH NWH VehicleController (player-type)
-    /// AND TrafficVehicle (NPC) cars. TrafficVehicle sits on root so GetComponentInParent
-    /// finds it from any child collider hit.
-    /// Reaction time = time from detection until player brakes.
-    /// </summary>
-    void DoCarAheadRaycastAndReaction()
-    {
-        Vector3 origin = transform.position + Vector3.up * raycastHeightOffset;
-        Vector3 direction = transform.forward;
-
-        if (Physics.Raycast(origin, direction, out RaycastHit hit, raycastDistance, vehicleRaycastLayerMask))
-        {
-            // ── VEHICLE TYPE CHECK ──────────────────────────────────────────────
-            // NWH player-type car: VehicleController may be anywhere in hierarchy
-            VehicleController hitVehicle = hit.collider.GetComponentInParent<VehicleController>();
-            if (hitVehicle == null) hitVehicle = hit.collider.GetComponent<VehicleController>();
-
-            // NPC traffic car: TrafficVehicle is always on root
-            TrafficVehicle hitTrafficVehicle = hit.collider.GetComponentInParent<TrafficVehicle>();
-            if (hitTrafficVehicle == null) hitTrafficVehicle = hit.collider.GetComponent<TrafficVehicle>();
-
-            // Must be at least one recognized vehicle type
-            bool isRecognizedVehicle = (hitVehicle != null) || (hitTrafficVehicle != null);
-            if (!isRecognizedVehicle) return;
-
-            // FIX #3: root-based self-check covers nested hierarchies
-            if (hit.collider.transform.root == transform.root) return;
-            // ────────────────────────────────────────────────────────────────────
-
-            float distanceToCar = hit.distance;
-
-            // FIX #2: wait for brake release before starting a new detection cycle
-            if (_waitingForBrakeRelease)
-            {
-                if (GetBrakeInput() <= 0.05f)
-                {
-                    _waitingForBrakeRelease = false;
-                    if (showDebugLogs) Debug.Log("[Car] Brake released – ready for next reaction measurement");
-                }
+                Debug.LogError($"[CarController] {name}: No CentralizedNavigationSystem found.");
+                enabled = false;
                 return;
             }
-
-            // FIX #1: else-if ensures detection frame != brake-check frame
-            // (prevents instant 0s recording when player is already braking)
-            if (_carAheadDetectedTime < 0f)
-            {
-                _carAheadDetectedTime = Time.time;
-
-                string vehicleType = hitTrafficVehicle != null ? "NPC TrafficVehicle" : "VehicleController";
-                if (showDebugLogs)
-                    Debug.Log($"[Car] Car ahead ({vehicleType}) at {distanceToCar:F1}m – measuring brake reaction");
-            }
-            else if (GetBrakeInput() > 0.05f)
-            {
-                float reactionTime = Time.time - _carAheadDetectedTime;
-                AddReactionTime(reactionTime);
-                if (showDebugLogs)
-                    Debug.Log($"[Car] Brake reaction: {reactionTime:F2}s (car ahead {distanceToCar:F1}m)");
-                _carAheadDetectedTime = -1f;
-                _waitingForBrakeRelease = true;
-            }
         }
-        else
+
+        _rb = GetComponent<Rigidbody>();
+    }
+
+    private void Update()
+    {
+        if (navSystem == null) return;
+
+        _routeRefreshTimer     += Time.deltaTime;
+        _closestNodeCacheTimer += Time.deltaTime;
+
+        if (!_hasBuiltInitialRoute)
         {
-            // No vehicle in range – reset detection state.
-            // Do NOT reset _waitingForBrakeRelease here: car may briefly leave
-            // range while brake is still physically held.
-            _carAheadDetectedTime = -1f;
+            _routeRefreshTimer = 0f;
+            BuildInitialRoute();
+        }
+        else if (_routeRefreshTimer >= routeRefreshInterval)
+        {
+            _routeRefreshTimer = 0f;
+            SmartRefresh();
+        }
+
+        if (showRouteVisualization && _currentNodePath.Count > 0)
+            navSystem.VisualizePlayerPath(_currentNodePath, transform.position);
+        else if (!showRouteVisualization)
+            navSystem.ClearPathVisualization();
+
+        if (followPath && _currentWaypoints.Count > 0)
+            TestFollowPath();
+
+        MeasureBrakeReaction();
+
+        dbgWaypointIndex  = _waypointIndex;
+        dbgTotalWaypoints = _currentWaypoints.Count;
+    }
+
+    private void OnDisable()
+    {
+        if (navSystem != null) navSystem.ClearPathVisualization();
+    }
+
+    // =========================================================================
+    //  BUILD INITIAL ROUTE
+    // =========================================================================
+
+    private void BuildInitialRoute()
+    {
+        if (!navSystem.RouteCacheReady) return;
+
+        int closestNode = GetClosestNodeCached();
+        if (closestNode == -1) return;
+
+        var result = navSystem.RequestRoute(closestNode);
+
+        if (!result.success)
+        {
+            Debug.LogWarning($"[CarController] Initial route failed: {result.failReason}");
+            return;
+        }
+
+        ApplyRouteResult(result, FixedDestNodeID);
+        _hasBuiltInitialRoute = true;
+
+        Debug.Log($"[CarController] Initial route: {_currentSourceNode}→{_currentDestNode}" +
+                  $" | {_currentWaypoints.Count} wps | mode={rerouteMode}");
+    }
+
+    // =========================================================================
+    //  SMART REFRESH
+    //  1. Trim passed waypoints  (no rebuild, no flicker)
+    //  2. Deviation check        (mode-dependent)
+    //  3. Rebuild if off-route   (same fixed destination)
+    // =========================================================================
+
+    private void SmartRefresh()
+    {
+        if (_currentWaypoints.Count == 0) return;
+
+        dbgRerouteTriggered = false;
+
+        TrimPassedWaypoints();
+
+        bool offRoute = rerouteMode == RerouteMode.AdaptiveThreshold
+            ? CheckDeviationAdaptive()
+            : CheckDeviationNavMesh();
+
+        if (offRoute)
+        {
+            dbgRerouteTriggered = true;
+            RebuildRoute();
         }
     }
 
-    /// <summary>
-    /// Always-visible gizmo for the car-ahead raycast.
-    /// Color encodes detection state:
-    ///   Cyan   = idle, no car in range
-    ///   Yellow = car detected, reaction timer running
-    ///   Red    = brake pressed / waiting for brake release cooldown
-    /// </summary>
-    void OnDrawGizmos()
+    // ─────────────────────────────────────────────────────────────────────────
+    //  TRIM PASSED WAYPOINTS
+    //  Advances _waypointIndex past any point that is now behind the car.
+    //  Pure index math — waypoint list never changes, zero flicker.
+    // ─────────────────────────────────────────────────────────────────────────
+    private void TrimPassedWaypoints()
     {
-        if (!showDebugGizmos) return;
+        Vector3 fwd = new Vector3(transform.forward.x, 0f, transform.forward.z).normalized;
 
-        Vector3 origin = transform.position + Vector3.up * raycastHeightOffset;
-        Vector3 direction = transform.forward;
-
-        // Color encodes current detection state
-        if (_waitingForBrakeRelease)
-            Gizmos.color = Color.red;
-        else if (_carAheadDetectedTime >= 0f)
-            Gizmos.color = Color.yellow;
-        else
-            Gizmos.color = Color.cyan;
-
-        // Main raycast line
-        Gizmos.DrawLine(origin, origin + direction * raycastDistance);
-
-        // End-cap sphere at max range
-        Gizmos.DrawWireSphere(origin + direction * raycastDistance, 0.3f);
-
-        // If car is detected, draw a sphere at the actual hit point
-        if (_carAheadDetectedTime >= 0f)
+        while (_waypointIndex < _currentWaypoints.Count - 1)
         {
-            if (Physics.Raycast(origin, direction, out RaycastHit hit, raycastDistance, vehicleRaycastLayerMask))
-            {
-                Gizmos.color = Color.yellow;
-                Gizmos.DrawWireSphere(hit.point, 0.6f);
+            Vector3 toWp = _currentWaypoints[_waypointIndex] - transform.position;
+            toWp.y = 0f;
+            if (Vector3.Dot(fwd, toWp) < 0f)
+                _waypointIndex++;
+            else
+                break;
+        }
+    }
 
-                // Highlight line from origin to hit point
-                Gizmos.color = Color.red;
-                Gizmos.DrawLine(origin, hit.point);
+    // ─────────────────────────────────────────────────────────────────────────
+    //  MODE A — ADAPTIVE THRESHOLD
+    //  Distance to nearest remaining waypoint vs local-spacing-scaled threshold.
+    //  sparse (40 m) → threshold 20 m  |  dense (4 m) → threshold 5 m
+    // ─────────────────────────────────────────────────────────────────────────
+    private bool CheckDeviationAdaptive()
+    {
+        if (_currentWaypoints.Count < 2) return false;
+
+        int   closestIdx  = _waypointIndex;
+        float closestDist = float.MaxValue;
+
+        for (int i = _waypointIndex; i < _currentWaypoints.Count; i++)
+        {
+            float d = Vector3.Distance(transform.position, _currentWaypoints[i]);
+            if (d < closestDist) { closestDist = d; closestIdx = i; }
+        }
+
+        int   nextIdx      = Mathf.Min(closestIdx + 1, _currentWaypoints.Count - 1);
+        float localSpacing = Vector3.Distance(
+            _currentWaypoints[closestIdx], _currentWaypoints[nextIdx]);
+
+        float threshold = Mathf.Clamp(
+            localSpacing * adaptiveThresholdMultiplier,
+            minDeviationThreshold, maxDeviationThreshold);
+
+        dbgDistToPath     = closestDist;
+        dbgAdaptiveThresh = threshold;
+
+        return closestDist > threshold;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  MODE B — NAVMESH PATH COMPARISON
+    //  Fresh NavMesh path length vs remaining original path length.
+    //  fresh > remaining × ratio  →  player went off-route  →  reroute.
+    // ─────────────────────────────────────────────────────────────────────────
+    private bool CheckDeviationNavMesh()
+    {
+        if (FixedDestNodeID < 0)                                       return false;
+        if (!navSystem.nodeMap.ContainsKey(FixedDestNodeID))           return false;
+
+        float remainingLen = GetRemainingPathLength();
+        dbgRemainingLen    = remainingLen;
+        if (remainingLen < 2f) return false;   // nearly at dest — don't reroute
+
+        Vector3 destPos = navSystem.nodeMap[FixedDestNodeID].worldPosition;
+
+        var  nmPath = new NavMeshPath();
+        bool ok     = NavMesh.CalculatePath(
+            transform.position, destPos, navMeshAreaMask, nmPath);
+
+        if (!ok || nmPath.status == NavMeshPathStatus.PathInvalid) return false;
+
+        float newLen  = GetNavMeshPathLength(nmPath);
+        dbgNavMeshLen = newLen;
+
+        return newLen > remainingLen * navMeshLengthRatio;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  REBUILD ROUTE  (same fixed destination, fresh source from current pos)
+    // ─────────────────────────────────────────────────────────────────────────
+    private void RebuildRoute()
+    {
+        int destNode = FixedDestNodeID >= 0 ? FixedDestNodeID : _currentDestNode;
+        if (destNode < 0) return;
+
+        if (_currentSourceNode != -1 && _currentDestNode != -1)
+            navSystem.ReleaseRoute(_currentSourceNode, _currentDestNode);
+
+        int closestNode = GetClosestNodeCached();
+        if (closestNode == -1) return;
+
+        var result = navSystem.RequestRoute(closestNode);
+        if (!result.success)
+        {
+            Debug.LogWarning($"[CarController] Reroute failed: {result.failReason}");
+            return;
+        }
+
+        ApplyRouteResult(result, destNode);
+        Debug.Log($"[CarController] Rerouted: {_currentSourceNode}→{_currentDestNode} " +
+                  $"| {_currentWaypoints.Count} wps | mode={rerouteMode}");
+    }
+
+    // fixedDest: when >= 0, override the node path to this destination so the
+    // line renderer always shows the route to the intended fixed target node,
+    // even though RequestRoute() only accepts a single source parameter.
+    private void ApplyRouteResult(CentralizedNavigationSystem.RouteResult result,
+                                  int fixedDest = -1)
+    {
+        _currentSourceNode = result.sourceNodeID;
+        _currentWaypoints  = result.waypoints ?? new List<Vector3>();
+        _waypointIndex     = 0;
+
+        // If a fixed destination is set, use FindPath(source → fixedDest) for the
+        // line renderer node path so the visualization always aims at the right node.
+        int destForPath    = (fixedDest >= 0) ? fixedDest : result.destinationNodeID;
+        _currentDestNode   = destForPath;
+
+        navSystem.InvalidatePlayerPathCache();
+        _currentNodePath   = navSystem.FindPath(result.sourceNodeID, destForPath)
+                             ?? new List<int>();
+    }
+
+    // =========================================================================
+    //  PUBLIC — FORCE REFRESH
+    // =========================================================================
+
+    public void ForceRouteRefresh()
+    {
+        _hasBuiltInitialRoute = false;
+        _currentWaypoints.Clear();
+        _currentNodePath.Clear();
+        _waypointIndex     = 0;
+        _currentSourceNode = -1;
+        _currentDestNode   = -1;
+        navSystem.InvalidatePlayerPathCache();
+        BuildInitialRoute();
+    }
+
+    // =========================================================================
+    //  UTILITY
+    // =========================================================================
+
+    private float GetRemainingPathLength()
+    {
+        float len = 0f;
+        for (int i = _waypointIndex; i < _currentWaypoints.Count - 1; i++)
+            len += Vector3.Distance(_currentWaypoints[i], _currentWaypoints[i + 1]);
+        return len;
+    }
+
+    private static float GetNavMeshPathLength(NavMeshPath path)
+    {
+        float len = 0f;
+        for (int i = 0; i < path.corners.Length - 1; i++)
+            len += Vector3.Distance(path.corners[i], path.corners[i + 1]);
+        return len;
+    }
+
+    private int GetClosestNodeCached()
+    {
+        if (_lastClosestNode == -1 || _closestNodeCacheTimer >= CLOSEST_NODE_CACHE_HZ)
+        {
+            _closestNodeCacheTimer = 0f;
+            _lastClosestNode = navSystem.GetClosestNode(transform.position);
+        }
+        return _lastClosestNode;
+    }
+
+    // =========================================================================
+    //  TEST FOLLOW PATH  (Transform only — no Rigidbody writes)
+    // =========================================================================
+
+    private void TestFollowPath()
+    {
+        if (_waypointIndex >= _currentWaypoints.Count)
+        {
+            _currentNodePath.Clear();
+            _hasBuiltInitialRoute = false;
+            navSystem.InvalidatePlayerPathCache();
+            return;
+        }
+
+        Vector3 toWpXZ = new Vector3(
+            _currentWaypoints[_waypointIndex].x - transform.position.x, 0f,
+            _currentWaypoints[_waypointIndex].z - transform.position.z);
+
+        if (toWpXZ.magnitude < testWaypointReachDistance) { _waypointIndex++; return; }
+
+        if (toWpXZ.sqrMagnitude > 0.001f)
+            transform.rotation = Quaternion.Slerp(transform.rotation,
+                Quaternion.LookRotation(toWpXZ.normalized), testTurnSpeed * Time.deltaTime);
+
+        transform.position += transform.forward * testFollowSpeed * Time.deltaTime;
+    }
+
+    // =========================================================================
+    //  BRAKE REACTION  (read-only — never writes to Rigidbody)
+    // =========================================================================
+
+    private void MeasureBrakeReaction()
+    {
+        Vector3 origin = transform.position + Vector3.up * 0.5f;
+        bool    hitNow = Physics.Raycast(origin, transform.forward,
+                                         reactionRayDistance, obstacleDetectionLayer);
+
+        if      ( hitNow && !_obstacleLastFrame) { _obstacleFirstSeenTime = Time.time; _reactionFired = false; }
+        else if (!hitNow &&  _obstacleLastFrame) { _obstacleFirstSeenTime = -1f;       _reactionFired = false; }
+
+        if (hitNow && !_reactionFired && _obstacleFirstSeenTime > 0f && _rb != null)
+        {
+            float speed = new Vector2(_rb.linearVelocity.x, _rb.linearVelocity.z).magnitude;
+            if (speed < 0.5f)
+            {
+                _lastReactionTime  = Time.time - _obstacleFirstSeenTime;
+                _reactionFired     = true;
+                _reactionTimeSum  += _lastReactionTime;
+                _reactionTimeCount++;
+                if (_lastReactionTime > _worstReactionTime) _worstReactionTime = _lastReactionTime;
+
+                Debug.Log($"[CarController] Reaction: {_lastReactionTime * 1000f:F0} ms " +
+                          $"| Avg: {GetAverageReactionTime() * 1000f:F0} ms " +
+                          $"| Worst: {_worstReactionTime * 1000f:F0} ms");
             }
         }
+
+        _obstacleLastFrame = hitNow;
     }
 
-    float GetBrakeInput()
-    {
-        if (vehicleControllerForInput != null && vehicleControllerForInput.input != null)
-            return vehicleControllerForInput.input.InputSwappedBrakes;
-        return Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.DownArrow) ? 1f : 0f;
-    }
+    // =========================================================================
+    //  PUBLIC API
+    // =========================================================================
 
-    float GetThrottleInput()
-    {
-        if (vehicleControllerForInput != null && vehicleControllerForInput.input != null)
-            return vehicleControllerForInput.input.InputSwappedThrottle;
-        return Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow) ? 1f : 0f;
-    }
-
-    void AddReactionTime(float reactionTimeSec)
-    {
-        _reactionTimesSec.Add(reactionTimeSec);
-        if (_reactionTimesSec.Count > MaxReactionEvents)
-            _reactionTimesSec.RemoveAt(0);
-    }
-
-    /// <summary>Average reaction time this session. Data provider reads this.</summary>
     public float GetAverageReactionTime()
-    {
-        if (_reactionTimesSec.Count == 0) return -1f;
-        float sum = 0f;
-        foreach (float t in _reactionTimesSec) sum += t;
-        return sum / _reactionTimesSec.Count;
-    }
+        => _reactionTimeCount > 0 ? _reactionTimeSum / _reactionTimeCount : -1f;
 
-    /// <summary>Worst (slowest) reaction time this session. Data provider reads this.</summary>
     public float GetWorstReactionTime()
-    {
-        if (_reactionTimesSec.Count == 0) return -1f;
-        float max = 0f;
-        foreach (float t in _reactionTimesSec)
-            if (t > max) max = t;
-        return max;
-    }
+        => _reactionTimeCount > 0 ? _worstReactionTime : -1f;
 
-    /// <summary>Clear reaction data (e.g. when starting new session).</summary>
     public void ClearReactionData()
     {
-        _reactionTimesSec.Clear();
-        _carAheadDetectedTime = -1f;
-        _waitingForBrakeRelease = false;
+        _reactionTimeSum       = 0f;
+        _reactionTimeCount     = 0;
+        _worstReactionTime     = -1f;
+        _lastReactionTime      = -1f;
+        _obstacleFirstSeenTime = -1f;
+        _obstacleLastFrame     = false;
+        _reactionFired         = false;
     }
 
-    void OnDisable()
+    public float         LastBrakeReactionTime => _lastReactionTime;
+    public List<int>     CurrentNodePath       => _currentNodePath;
+    public List<Vector3> CurrentWaypoints      => _currentWaypoints;
+    public int           CurrentSourceNode     => _currentSourceNode;
+    public int           CurrentDestNode       => _currentDestNode;
+    public bool          HasRoute              => _hasBuiltInitialRoute && _currentNodePath.Count > 0;
+
+    // =========================================================================
+    //  GIZMOS
+    // =========================================================================
+
+#if UNITY_EDITOR
+    private void OnDrawGizmosSelected()
     {
-        if (navSystem != null)
-            navSystem.ClearPathVisualization();
-    }
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawRay(transform.position + Vector3.up * 0.5f,
+                       transform.forward * reactionRayDistance);
 
-    void OnDestroy()
-    {
-        if (navSystem != null)
-            navSystem.ClearPathVisualization();
-    }
-
-    private bool IsPlayerOffRoute()
-    {
-        if (currentPath == null || currentPath.Count == 0) return false;
-
-        NavNode closestNode = GetClosestNode();
-        if (closestNode == null) return false;
-
-        int closestNodeID = closestNode.nodeID;
-        bool isOnPath = currentPath.Contains(closestNodeID);
-
-        float minDistToPath = float.MaxValue;
-        foreach (int nodeID in currentPath)
+        if (_currentWaypoints != null && _waypointIndex < _currentWaypoints.Count)
         {
-            if (navSystem.nodeMap.ContainsKey(nodeID))
+            Gizmos.color = Color.cyan;
+            Gizmos.DrawSphere(_currentWaypoints[_waypointIndex], 0.4f);
+            Gizmos.DrawLine(transform.position, _currentWaypoints[_waypointIndex]);
+        }
+
+        if (!Application.isPlaying) return;
+
+        string modeInfo = rerouteMode == RerouteMode.AdaptiveThreshold
+            ? $"Adaptive  dist={dbgDistToPath:F1}m  thresh={dbgAdaptiveThresh:F1}m"
+            : $"NavMesh   remaining={dbgRemainingLen:F1}m  fresh={dbgNavMeshLen:F1}m";
+
+        UnityEditor.Handles.Label(
+            transform.position + Vector3.up * 3.5f,
+            $"WP {dbgWaypointIndex}/{dbgTotalWaypoints}  dest={( fixedDestinationNode != null ? fixedDestinationNode.name : _currentDestNode.ToString() )}\n" +
+            modeInfo + (dbgRerouteTriggered ? "  ← REROUTED" : ""),
+            new GUIStyle
             {
-                float dist = Vector3.Distance(transform.position, navSystem.nodeMap[nodeID].worldPosition);
-                if (dist < minDistToPath) minDistToPath = dist;
+                normal    = new GUIStyleState
+                {
+                    textColor = dbgRerouteTriggered
+                        ? new Color(1f, 0.4f, 0.1f)
+                        : new Color(0.3f, 1f, 0.3f)
+                },
+                fontSize  = 10,
+                fontStyle = FontStyle.Bold
+            });
+
+        // Draw adaptive threshold circle in scene
+        if (rerouteMode == RerouteMode.AdaptiveThreshold && dbgAdaptiveThresh > 0f)
+        {
+            Gizmos.color = new Color(0.2f, 1f, 0.2f, 0.2f);
+            int seg = 24;
+            float step = 360f / seg;
+            for (int i = 0; i < seg; i++)
+            {
+                float a0 = i * step * Mathf.Deg2Rad, a1 = (i + 1) * step * Mathf.Deg2Rad;
+                Gizmos.DrawLine(
+                    transform.position + new Vector3(Mathf.Cos(a0), 0f, Mathf.Sin(a0)) * dbgAdaptiveThresh,
+                    transform.position + new Vector3(Mathf.Cos(a1), 0f, Mathf.Sin(a1)) * dbgAdaptiveThresh);
             }
         }
-
-        bool offRoute = !isOnPath || minDistToPath > offRouteThreshold;
-
-        if (offRoute && showDebugLogs)
-            Debug.Log($"[Car] Off-route detected! Closest node: {closestNodeID}, On path: {isOnPath}, Distance to path: {minDistToPath:F2}");
-
-        return offRoute;
     }
-
-    public void FindAndFollowPath()
-    {
-        if (navSystem == null)
-        {
-            Debug.LogWarning("[Car] navSystem is NULL – cannot pathfind");
-            return;
-        }
-        if (targetNode == null)
-        {
-            Debug.LogWarning("[Car] targetNode is NULL – assign a NavNode as target");
-            return;
-        }
-        if (navSystem.nodes == null || navSystem.nodes.Count == 0)
-        {
-            Debug.LogWarning("[Car] navSystem has no nodes – run Collect All Nodes / Setup Demo Scene");
-            return;
-        }
-
-        NavNode startNode = GetClosestNode();
-        if (startNode == null)
-        {
-            Debug.LogWarning("[Car] No closest node found to car position");
-            return;
-        }
-
-        if (showDebugLogs)
-            Debug.Log($"[Car] Finding path from node {startNode.nodeID} at {startNode.worldPosition} " +
-                      $"to node {targetNode.nodeID} at {targetNode.worldPosition}");
-
-        List<int> path = navSystem.FindPath(startNode.nodeID, targetNode.nodeID);
-        if (path == null || path.Count == 0)
-        {
-            Debug.LogWarning("[Car] FindPath returned null or empty – no path found");
-            currentPath.Clear();
-            navSystem.ClearPathVisualization();
-            return;
-        }
-
-        currentPath = path;
-        currentWaypointIndex = 1;
-        lastClosestNodeID = startNode.nodeID;
-
-        if (showDebugLogs)
-        {
-            string pathStr = string.Join(" -> ", currentPath);
-            Debug.Log($"[Car] Path found with {currentPath.Count} nodes: {pathStr}");
-        }
-
-        navSystem.VisualizePath(currentPath);
-    }
-
-    private NavNode GetClosestNode()
-    {
-        NavNode closest = null;
-        float closestDist = float.MaxValue;
-        Vector3 pos = transform.position;
-
-        foreach (var node in navSystem.nodes)
-        {
-            if (node == null) continue;
-            float d = Vector3.Distance(pos, node.worldPosition);
-            if (d < closestDist)
-            {
-                closestDist = d;
-                closest = node;
-            }
-        }
-
-        if (showDebugLogs && closest != null)
-            Debug.Log($"[Car] Closest node is {closest.nodeID} at distance {closestDist:F2}");
-
-        return closest;
-    }
+#endif
 }
