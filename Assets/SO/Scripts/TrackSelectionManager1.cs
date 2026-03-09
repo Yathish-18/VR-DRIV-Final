@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using UnityEngine.SceneManagement;
@@ -29,10 +29,8 @@ public class TrackSelectionManager : MonoBehaviour
     [SerializeField] private Image trackLayoutImage;
     [SerializeField] private Image trackPreviewImage;
 
-    // --- ADDED PLAYER NAME INPUT HERE ---
     [Header("Player Settings")]
     [SerializeField] private TMP_InputField playerNameInput;
-    // ------------------------------------
 
     [Header("Navigation Buttons")]
     [SerializeField] private Button previousTrackButton;
@@ -56,17 +54,25 @@ public class TrackSelectionManager : MonoBehaviour
     // Game data to pass to next scene
     public TrackSelectionData GameSessionData { get; private set; }
 
+    // Cache the original skybox so we can restore it on scene exit
+    private Material originalSkybox;
+
+    // ─────────────────────────────────────────────
+    // LIFECYCLE
+    // ─────────────────────────────────────────────
+
     private void Awake()
     {
         if (gameDatabase == null)
         {
-            Debug.LogError("RacingGameDatabaseSO is not assigned! Please assign the database in the inspector.");
+            Debug.LogError("[TrackSelectionManager] RacingGameDatabaseSO is not assigned!");
             return;
         }
 
         GameSessionData = new TrackSelectionData();
+        originalSkybox = RenderSettings.skybox;
 
-        if (enableDebugLogs) Debug.Log("TrackSelectionManager initialized");
+        if (enableDebugLogs) Debug.Log("[TrackSelectionManager] Initialized.");
     }
 
     private void Start()
@@ -80,32 +86,141 @@ public class TrackSelectionManager : MonoBehaviour
         SetupButtonListeners();
         InitializeUI();
 
-        // Initial Updates
         UpdateTrackDisplay();
         UpdateSessionStatus();
 
-        // --- LIVE PREVIEW UPDATE ---
+        // Print skybox info for every weather SO so missing materials are obvious
+        DebugWeatherSetup();
+
+        // Apply skybox for the default / restored weather selection
+        ApplySkyboxDirect(selectedWeatherIndex);
+
+        // Also notify EnvironmentManager if one is wired up
         UpdateMenuEnvironment();
 
-        // --- LOAD PLAYER NAME ---
+        // Load persisted player name
         if (playerNameInput != null && GamePersistenceManager.Instance != null)
-        {
             playerNameInput.text = GamePersistenceManager.Instance.playerName;
+    }
+
+    private void OnDestroy()
+    {
+        // Restore original skybox when leaving the menu so other scenes aren't affected
+        if (originalSkybox != null)
+        {
+            RenderSettings.skybox = originalSkybox;
+            DynamicGI.UpdateEnvironment();
         }
     }
 
-    // --- NEW HELPER METHOD FOR LIVE PREVIEW ---
+    // ─────────────────────────────────────────────
+    // SKYBOX — DIRECT APPLICATION
+    // ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Directly swaps RenderSettings.skybox to the material on the WeatherConditionSO.
+    /// Works even when no EnvironmentManager is present in the scene.
+    /// </summary>
+    private void ApplySkyboxDirect(int weatherIndex)
+    {
+        if (gameDatabase == null)
+        {
+            Debug.LogError("[TrackSelectionManager] Cannot apply skybox — gameDatabase is null.");
+            return;
+        }
+
+        WeatherConditionSO weather = gameDatabase.GetWeather(weatherIndex);
+
+        if (weather == null)
+        {
+            Debug.LogError($"[TrackSelectionManager] GetWeather({weatherIndex}) returned null.");
+            return;
+        }
+
+        if (weather.skyboxMaterial == null)
+        {
+            Debug.LogWarning($"[TrackSelectionManager] Weather '{weather.weatherName}' has no skybox material. " +
+                             "Open the WeatherConditionSO asset and assign a Skybox/* material.");
+            return;
+        }
+
+        // ── Swap the skybox ───────────────────────────────────────────────────
+        RenderSettings.skybox = weather.skyboxMaterial;
+
+        // Apply tint colour — shader property name varies by skybox type:
+        //   Skybox/6 Sided      → "_Tint"
+        //   Skybox/Procedural   → "_SkyTint"
+        //   Skybox/Cubemap      → "_Tint"
+        if (weather.skyboxMaterial.HasProperty("_Tint"))
+            weather.skyboxMaterial.SetColor("_Tint", weather.skyboxTint);
+        else if (weather.skyboxMaterial.HasProperty("_SkyTint"))
+            weather.skyboxMaterial.SetColor("_SkyTint", weather.skyboxTint);
+
+        // Apply fog settings
+        RenderSettings.fogDensity = weather.fogDensity;
+        RenderSettings.fogColor = weather.skyboxTint;
+
+        // Recalculate ambient GI from the new skybox
+        DynamicGI.UpdateEnvironment();
+
+        if (enableDebugLogs)
+            Debug.Log($"[TrackSelectionManager] ✓ Skybox applied → '{weather.skyboxMaterial.name}'  (weather: {weather.weatherName})");
+    }
+
+    // ─────────────────────────────────────────────
+    // ENVIRONMENT MANAGER NOTIFICATION
+    // ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Forwards the current weather + time selection to the optional EnvironmentManager.
+    /// The skybox swap is handled separately by ApplySkyboxDirect so it always works.
+    /// </summary>
     private void UpdateMenuEnvironment()
     {
-        if (menuEnvironmentManager != null && gameDatabase != null)
-        {
-            WeatherConditionSO w = gameDatabase.GetWeather(selectedWeatherIndex);
-            TimeOfDaySettingsSO t = gameDatabase.GetTimeOfDay(selectedTimeIndex);
+        if (menuEnvironmentManager == null || gameDatabase == null) return;
 
-            // Send data to the local EnvironmentManager to update the background immediately
-            menuEnvironmentManager.UpdateEnvironment(w, t);
-        }
+        WeatherConditionSO weather = gameDatabase.GetWeather(selectedWeatherIndex);
+        TimeOfDaySettingsSO timeOfDay = gameDatabase.GetTimeOfDay(selectedTimeIndex);
+
+        menuEnvironmentManager.UpdateEnvironment(weather, timeOfDay);
     }
+
+    // ─────────────────────────────────────────────
+    // DEBUG
+    // ─────────────────────────────────────────────
+
+    private void DebugWeatherSetup()
+    {
+        if (!enableDebugLogs) return;
+        if (gameDatabase == null) { Debug.LogError("[TrackSelectionManager] gameDatabase is NULL"); return; }
+
+        Debug.Log($"[TrackSelectionManager] --- Weather Debug ({gameDatabase.WeatherConditions.Count} entries) ---");
+
+        for (int i = 0; i < gameDatabase.WeatherConditions.Count; i++)
+        {
+            WeatherConditionSO w = gameDatabase.WeatherConditions[i];
+
+            if (w == null)
+            {
+                Debug.LogError($"[TrackSelectionManager]   [{i}] NULL entry — remove the empty slot from the database list.");
+                continue;
+            }
+
+            string matInfo = w.skyboxMaterial != null
+                ? $"'{w.skyboxMaterial.name}'  shader: {w.skyboxMaterial.shader.name}"
+                : "NULL  ← ASSIGN A SKYBOX MATERIAL IN THIS WeatherConditionSO";
+
+            Debug.Log($"[TrackSelectionManager]   [{i}] '{w.weatherName}'  |  SkyboxMat: {matInfo}");
+        }
+
+        string currentMat = RenderSettings.skybox != null ? RenderSettings.skybox.name : "NULL";
+        Debug.Log($"[TrackSelectionManager] RenderSettings.skybox before swap: '{currentMat}'");
+        Debug.Log($"[TrackSelectionManager] -------------------------------------------------");
+    }
+
+    // ─────────────────────────────────────────────
+    // INITIALISATION HELPERS
+    // ─────────────────────────────────────────────
 
     private IEnumerator EnsureEventSystemRoutine()
     {
@@ -129,36 +244,37 @@ public class TrackSelectionManager : MonoBehaviour
 
     private void RestorePreviousSelection()
     {
-        if (GamePersistenceManager.Instance != null)
+        if (GamePersistenceManager.Instance == null) return;
+
+        TrackDataSO persistedTrack = GamePersistenceManager.Instance.GetSelectedTrack();
+        WeatherConditionSO persistedWeather = GamePersistenceManager.Instance.GetSelectedWeather();
+        TimeOfDaySettingsSO persistedTime = GamePersistenceManager.Instance.GetSelectedTime();
+
+        if (persistedTrack != null)
         {
-            TrackDataSO persistedTrack = GamePersistenceManager.Instance.GetSelectedTrack();
-            WeatherConditionSO persistedWeather = GamePersistenceManager.Instance.GetSelectedWeather();
-            TimeOfDaySettingsSO persistedTime = GamePersistenceManager.Instance.GetSelectedTime();
+            var found = gameDatabase.AvailableTracks.Find(t => t.trackName == persistedTrack.trackName);
+            if (found != null) currentTrackIndex = gameDatabase.AvailableTracks.IndexOf(found);
+        }
 
-            if (persistedTrack != null)
-            {
-                var foundTrack = gameDatabase.AvailableTracks.Find(t => t.trackName == persistedTrack.trackName);
-                if (foundTrack != null) currentTrackIndex = gameDatabase.AvailableTracks.IndexOf(foundTrack);
-            }
+        if (persistedWeather != null)
+        {
+            var found = gameDatabase.WeatherConditions.Find(w => w.weatherName == persistedWeather.weatherName);
+            if (found != null) selectedWeatherIndex = gameDatabase.WeatherConditions.IndexOf(found);
+        }
 
-            if (persistedWeather != null)
-            {
-                var foundWeather = gameDatabase.WeatherConditions.Find(w => w.weatherName == persistedWeather.weatherName);
-                if (foundWeather != null) selectedWeatherIndex = gameDatabase.WeatherConditions.IndexOf(foundWeather);
-            }
-
-            if (persistedTime != null)
-            {
-                var foundTime = gameDatabase.TimeSettings.Find(t => t.timeName == persistedTime.timeName);
-                if (foundTime != null) selectedTimeIndex = gameDatabase.TimeSettings.IndexOf(foundTime);
-            }
+        if (persistedTime != null)
+        {
+            var found = gameDatabase.TimeSettings.Find(t => t.timeName == persistedTime.timeName);
+            if (found != null) selectedTimeIndex = gameDatabase.TimeSettings.IndexOf(found);
         }
     }
 
     private void ValidateDatabase()
     {
         if (gameDatabase == null) return;
-        if (gameDatabase.AvailableTracks.Count == 0) Debug.LogWarning("No tracks available");
+        if (gameDatabase.AvailableTracks.Count == 0) Debug.LogWarning("[TrackSelectionManager] No tracks in database.");
+        if (gameDatabase.WeatherConditions.Count == 0) Debug.LogWarning("[TrackSelectionManager] No weather conditions in database.");
+        if (gameDatabase.TimeSettings.Count == 0) Debug.LogWarning("[TrackSelectionManager] No time-of-day settings in database.");
     }
 
     private void SetupButtonListeners()
@@ -170,13 +286,15 @@ public class TrackSelectionManager : MonoBehaviour
         for (int i = 0; i < weatherButtons.Length; i++)
         {
             int index = i;
-            if (weatherButtons[i] != null) weatherButtons[i].onClick.AddListener(() => SelectWeather(index));
+            if (weatherButtons[i] != null)
+                weatherButtons[i].onClick.AddListener(() => SelectWeather(index));
         }
 
         for (int i = 0; i < timeOfDayButtons.Length; i++)
         {
             int index = i;
-            if (timeOfDayButtons[i] != null) timeOfDayButtons[i].onClick.AddListener(() => SelectTimeOfDay(index));
+            if (timeOfDayButtons[i] != null)
+                timeOfDayButtons[i].onClick.AddListener(() => SelectTimeOfDay(index));
         }
     }
 
@@ -186,6 +304,10 @@ public class TrackSelectionManager : MonoBehaviour
         UpdateWeatherButtons();
         UpdateTimeOfDayButtons();
     }
+
+    // ─────────────────────────────────────────────
+    // TRACK NAVIGATION
+    // ─────────────────────────────────────────────
 
     public void SelectPreviousTrack()
     {
@@ -202,6 +324,36 @@ public class TrackSelectionManager : MonoBehaviour
         UpdateTrackDisplay();
         UpdateNavigationButtons();
     }
+
+    // ─────────────────────────────────────────────
+    // WEATHER & TIME SELECTION
+    // ─────────────────────────────────────────────
+
+    public void SelectWeather(int weatherIndex)
+    {
+        if (gameDatabase == null || weatherIndex < 0 || weatherIndex >= gameDatabase.WeatherConditions.Count) return;
+
+        selectedWeatherIndex = weatherIndex;
+        UpdateWeatherButtons();
+        UpdateSessionStatus();
+
+        ApplySkyboxDirect(selectedWeatherIndex); // swap skybox immediately
+        UpdateMenuEnvironment();                  // also notify EnvironmentManager
+    }
+
+    public void SelectTimeOfDay(int timeIndex)
+    {
+        if (gameDatabase == null || timeIndex < 0 || timeIndex >= gameDatabase.TimeSettings.Count) return;
+
+        selectedTimeIndex = timeIndex;
+        UpdateTimeOfDayButtons();
+        UpdateSessionStatus();
+        UpdateMenuEnvironment();
+    }
+
+    // ─────────────────────────────────────────────
+    // UI UPDATES
+    // ─────────────────────────────────────────────
 
     private void UpdateTrackDisplay()
     {
@@ -228,30 +380,6 @@ public class TrackSelectionManager : MonoBehaviour
         }
     }
 
-    public void SelectWeather(int weatherIndex)
-    {
-        if (gameDatabase == null || weatherIndex < 0 || weatherIndex >= gameDatabase.WeatherConditions.Count) return;
-
-        selectedWeatherIndex = weatherIndex;
-        UpdateWeatherButtons();
-        UpdateSessionStatus();
-
-        // --- UPDATE LIVE PREVIEW ---
-        UpdateMenuEnvironment();
-    }
-
-    public void SelectTimeOfDay(int timeIndex)
-    {
-        if (gameDatabase == null || timeIndex < 0 || timeIndex >= gameDatabase.TimeSettings.Count) return;
-
-        selectedTimeIndex = timeIndex;
-        UpdateTimeOfDayButtons();
-        UpdateSessionStatus();
-
-        // --- UPDATE LIVE PREVIEW ---
-        UpdateMenuEnvironment();
-    }
-
     private void UpdateNavigationButtons()
     {
         bool hasMultiple = gameDatabase != null && gameDatabase.AvailableTracks.Count > 1;
@@ -263,13 +391,11 @@ public class TrackSelectionManager : MonoBehaviour
     {
         for (int i = 0; i < weatherButtons.Length && i < gameDatabase.WeatherConditions.Count; i++)
         {
-            if (weatherButtons[i] != null)
-            {
-                ColorBlock colors = weatherButtons[i].colors;
-                colors.normalColor = i == selectedWeatherIndex ? Color.cyan : Color.white;
-                colors.selectedColor = i == selectedWeatherIndex ? Color.cyan : Color.white;
-                weatherButtons[i].colors = colors;
-            }
+            if (weatherButtons[i] == null) continue;
+            ColorBlock colors = weatherButtons[i].colors;
+            colors.normalColor = (i == selectedWeatherIndex) ? Color.cyan : Color.white;
+            colors.selectedColor = (i == selectedWeatherIndex) ? Color.cyan : Color.white;
+            weatherButtons[i].colors = colors;
         }
     }
 
@@ -277,13 +403,11 @@ public class TrackSelectionManager : MonoBehaviour
     {
         for (int i = 0; i < timeOfDayButtons.Length && i < gameDatabase.TimeSettings.Count; i++)
         {
-            if (timeOfDayButtons[i] != null)
-            {
-                ColorBlock colors = timeOfDayButtons[i].colors;
-                colors.normalColor = i == selectedTimeIndex ? Color.yellow : Color.white;
-                colors.selectedColor = i == selectedTimeIndex ? Color.yellow : Color.white;
-                timeOfDayButtons[i].colors = colors;
-            }
+            if (timeOfDayButtons[i] == null) continue;
+            ColorBlock colors = timeOfDayButtons[i].colors;
+            colors.normalColor = (i == selectedTimeIndex) ? Color.yellow : Color.white;
+            colors.selectedColor = (i == selectedTimeIndex) ? Color.yellow : Color.white;
+            timeOfDayButtons[i].colors = colors;
         }
     }
 
@@ -306,9 +430,14 @@ public class TrackSelectionManager : MonoBehaviour
         }
     }
 
+    // ─────────────────────────────────────────────
+    // DRIVE / SESSION START
+    // ─────────────────────────────────────────────
+
     public void StartDriving()
     {
         if (gameDatabase == null) return;
+
         var currentTrack = gameDatabase.GetTrack(currentTrackIndex);
 
         if (currentTrack != null && !string.IsNullOrEmpty(currentTrack.sceneName))
@@ -318,7 +447,7 @@ public class TrackSelectionManager : MonoBehaviour
         }
         else
         {
-            Debug.LogError("Track Scene Name invalid!");
+            Debug.LogError("[TrackSelectionManager] Track scene name is invalid or empty!");
         }
     }
 
@@ -329,14 +458,10 @@ public class TrackSelectionManager : MonoBehaviour
         GameSessionData.timeOfDay = gameDatabase.GetTimeOfDay(selectedTimeIndex);
         GameSessionData.timestamp = System.DateTime.Now;
 
-        // Send to Persistence Manager so the NEXT scene can read it
         if (GamePersistenceManager.Instance != null)
         {
-            // --- SAVE PLAYER NAME BEFORE STARTING ---
             if (playerNameInput != null)
-            {
                 GamePersistenceManager.Instance.SetPlayerName(playerNameInput.text);
-            }
 
             GamePersistenceManager.Instance.SetSessionData(
                 GameSessionData.selectedTrack,
@@ -346,11 +471,18 @@ public class TrackSelectionManager : MonoBehaviour
         }
     }
 
-    // Accessors
+    // ─────────────────────────────────────────────
+    // PUBLIC ACCESSORS
+    // ─────────────────────────────────────────────
+
     public TrackDataSO GetCurrentTrack() => gameDatabase?.GetTrack(currentTrackIndex);
     public WeatherConditionSO GetCurrentWeather() => gameDatabase?.GetWeather(selectedWeatherIndex);
     public TimeOfDaySettingsSO GetCurrentTimeOfDay() => gameDatabase?.GetTimeOfDay(selectedTimeIndex);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DATA CONTAINER
+// ─────────────────────────────────────────────────────────────────────────────
 
 [System.Serializable]
 public class TrackSelectionData

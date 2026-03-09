@@ -1,7 +1,7 @@
 ﻿using UnityEngine;
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq; // Added for easier list management
+using System.Linq;
 
 public class TrafficLightIntersectionManager : MonoBehaviour
 {
@@ -54,6 +54,17 @@ public class TrafficLightIntersectionManager : MonoBehaviour
         }
     }
 
+    // FIX: Reset all state when the object/scene is disabled or unloaded
+    void OnDisable()
+    {
+        isRunning = false;
+        if (cycleCoroutine != null)
+        {
+            StopCoroutine(cycleCoroutine);
+            cycleCoroutine = null;
+        }
+    }
+
     // Removes any empty slots in the Inspector lists
     void CleanLists()
     {
@@ -79,7 +90,15 @@ public class TrafficLightIntersectionManager : MonoBehaviour
 
     public void StartIntersectionCycle()
     {
-        if (isRunning) return;
+        // FIX: Kill any stale coroutine before starting fresh
+        if (cycleCoroutine != null)
+        {
+            StopCoroutine(cycleCoroutine);
+            cycleCoroutine = null;
+        }
+
+        // FIX: Always reset isRunning before re-entering so guard never blocks a fresh start
+        isRunning = false;
 
         // Final safety check
         if (groupA.Count == 0 && groupB.Count == 0)
@@ -96,7 +115,11 @@ public class TrafficLightIntersectionManager : MonoBehaviour
     public void StopIntersectionCycle()
     {
         isRunning = false;
-        if (cycleCoroutine != null) StopCoroutine(cycleCoroutine);
+        if (cycleCoroutine != null)
+        {
+            StopCoroutine(cycleCoroutine);
+            cycleCoroutine = null;
+        }
 
         InitializeLights(); // Reset to all red
         status = "Stopped (All Red)";

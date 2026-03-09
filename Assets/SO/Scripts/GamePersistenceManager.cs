@@ -1,7 +1,7 @@
-using UnityEngine;
+﻿using UnityEngine;
 using UnityEngine.SceneManagement;
 using System.Collections.Generic;
-using Proyecto26; // Required for RestClient
+using Proyecto26;
 
 public class GamePersistenceManager : MonoBehaviour
 {
@@ -13,7 +13,7 @@ public class GamePersistenceManager : MonoBehaviour
     public string databaseUrl = "https://YOUR-PROJECT-ID.firebaseio.com";
 
     [Header("Player Identity")]
-    public string playerName = "Driver"; // Stores the name safely
+    public string playerName = "Driver";
 
     [Header("Current Session Data")]
     public TrackDataSO selectedTrack;
@@ -63,15 +63,31 @@ public class GamePersistenceManager : MonoBehaviour
 
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
-        EnvironmentManager envManager = FindObjectOfType<EnvironmentManager>();
-        if (envManager != null)
+        // Only apply environment in game scenes, NOT the track selection menu.
+        // TrackSelectionManager handles its own environment in the menu scene.
+        if (scene.name == trackSelectionSceneName)
         {
-            envManager.UpdateEnvironment(selectedWeather, selectedTime);
+            if (clearDataOnReturnToMenu)
+                ResetSessionData();
+            return; // ← skip environment apply in menu scene
         }
 
-        if (clearDataOnReturnToMenu && scene.name == trackSelectionSceneName)
+        // In game scenes: apply environment only if we actually have session data
+        if (selectedWeather != null || selectedTime != null)
         {
-            ResetSessionData();
+            EnvironmentManager envManager = FindObjectOfType<EnvironmentManager>();
+            if (envManager != null)
+            {
+                envManager.UpdateEnvironment(selectedWeather, selectedTime);
+                if (enableDebugLogs)
+                    Debug.Log($"[GamePersistenceManager] Environment applied in scene '{scene.name}' " +
+                              $"— Weather: {selectedWeather?.weatherName ?? "none"}, Time: {selectedTime?.timeName ?? "none"}");
+            }
+        }
+        else
+        {
+            if (enableDebugLogs)
+                Debug.LogWarning($"[GamePersistenceManager] Scene '{scene.name}' loaded but no session data set yet — environment not applied.");
         }
     }
 
@@ -84,9 +100,8 @@ public class GamePersistenceManager : MonoBehaviour
     public WeatherConditionSO GetSelectedWeather() => selectedWeather;
     public TimeOfDaySettingsSO GetSelectedTime() => selectedTime;
 
-    // --- DATA MANAGEMENT METHODS ---
+    // --- DATA MANAGEMENT ---
 
-    // This is called by the UI Script
     public void SetPlayerName(string name)
     {
         if (string.IsNullOrEmpty(name)) return;
@@ -101,6 +116,11 @@ public class GamePersistenceManager : MonoBehaviour
         selectedWeather = weather;
         selectedTime = time;
         sessionStartTime = System.DateTime.Now;
+
+        if (enableDebugLogs)
+            Debug.Log($"[GamePersistenceManager] Session data set — Track: {track?.trackName}, " +
+                      $"Weather: {weather?.weatherName}, Time: {time?.timeName}");
+
         if (autoSave) SaveGameData();
     }
 
@@ -119,18 +139,16 @@ public class GamePersistenceManager : MonoBehaviour
 
         if (autoSave) SaveGameData();
 
-        // --- REST CLIENT SAVE ---
         SaveResultToFirebase(lapTime, position);
 
-        if (enableDebugLogs) Debug.Log($"Race Saved. Racer: {playerName}, Time: {lapTime}");
+        if (enableDebugLogs) Debug.Log($"[GamePersistenceManager] Race saved. Racer: {playerName}, Time: {lapTime}");
     }
 
-    // --- REST CLIENT LOGIC ---
     private void SaveResultToFirebase(float time, int position)
     {
         if (string.IsNullOrEmpty(databaseUrl) || databaseUrl.Contains("YOUR-PROJECT-ID"))
         {
-            if (enableDebugLogs) Debug.LogWarning("Firebase URL not set properly!");
+            if (enableDebugLogs) Debug.LogWarning("[GamePersistenceManager] Firebase URL not configured.");
             return;
         }
 
@@ -138,9 +156,9 @@ public class GamePersistenceManager : MonoBehaviour
         string url = $"{databaseUrl}/race_results.json";
 
         RestClient.Post(url, data).Then(response => {
-            if (enableDebugLogs) Debug.Log($"Success! Data uploaded. Status: {response.StatusCode}");
+            if (enableDebugLogs) Debug.Log($"[GamePersistenceManager] Firebase upload success. Status: {response.StatusCode}");
         }).Catch(err => {
-            Debug.LogError($"Error uploading data: {err.Message}");
+            Debug.LogError($"[GamePersistenceManager] Firebase upload failed: {err.Message}");
         });
     }
 
@@ -167,7 +185,8 @@ public class GamePersistenceManager : MonoBehaviour
         PlayerPrefs.DeleteAll();
     }
 
-    // --- SAVE / LOAD SYSTEM ---
+    // --- SAVE / LOAD ---
+
     public void SaveGameData()
     {
         PlayerPrefs.SetString("PlayerName", playerName);
@@ -191,10 +210,12 @@ public class GamePersistenceManager : MonoBehaviour
             string tName = PlayerPrefs.GetString("SelectedTrack", "");
             string wName = PlayerPrefs.GetString("SelectedWeather", "");
             string timeName = PlayerPrefs.GetString("SelectedTime", "");
+
             if (!string.IsNullOrEmpty(tName)) selectedTrack = gameDatabase.AvailableTracks.Find(t => t.trackName == tName);
             if (!string.IsNullOrEmpty(wName)) selectedWeather = gameDatabase.WeatherConditions.Find(w => w.weatherName == wName);
             if (!string.IsNullOrEmpty(timeName)) selectedTime = gameDatabase.TimeSettings.Find(t => t.timeName == timeName);
         }
+
         totalRaces = PlayerPrefs.GetInt("TotalRaces", 0);
         bestLapTime = PlayerPrefs.GetFloat("BestLapTime", float.MaxValue);
         string tracks = PlayerPrefs.GetString("CompletedTracks", "");
@@ -215,10 +236,10 @@ public class RaceData
 
     public RaceData(string name, float time, int pos, string track)
     {
-        this.username = name;
-        this.lapTime = time;
-        this.position = pos;
-        this.trackName = track;
-        this.timestamp = System.DateTime.Now.ToString();
+        username = name;
+        lapTime = time;
+        position = pos;
+        trackName = track;
+        timestamp = System.DateTime.Now.ToString();
     }
 }

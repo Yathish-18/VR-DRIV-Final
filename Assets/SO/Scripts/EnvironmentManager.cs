@@ -1,34 +1,27 @@
-using UnityEngine;
-using System.Linq; // Needed for easier searching
+﻿using UnityEngine;
 
 public class EnvironmentManager : MonoBehaviour
 {
-    [Header("Scene References")]
-    // We remove the [SerializeField] requirement because we will find it via code now
     private Light mainDirectionalLight;
 
     public void UpdateEnvironment(WeatherConditionSO weather, TimeOfDaySettingsSO time)
     {
-        // 1. First, try to find the light automatically if we don't have it
         if (mainDirectionalLight == null)
-        {
             FindMainLight();
-        }
 
-        ApplyWeather(weather);
+        // Order matters: time runs first, weather runs second and ALWAYS wins the skybox
         ApplyTimeOfDay(time);
+        ApplyWeather(weather);
     }
 
     private void FindMainLight()
     {
-        // Option A: Check Unity's built-in "Sun" setting (Best if set up in Lighting window)
         if (RenderSettings.sun != null)
         {
             mainDirectionalLight = RenderSettings.sun;
             return;
         }
 
-        // Option B: Find the first Directional Light in the scene (Most reliable fallback)
         Light[] allLights = FindObjectsOfType<Light>();
         foreach (Light l in allLights)
         {
@@ -39,27 +32,46 @@ public class EnvironmentManager : MonoBehaviour
             }
         }
 
-        Debug.LogWarning("EnvironmentManager: Could not find a Directional Light in this scene!");
+        Debug.LogWarning("[EnvironmentManager] No Directional Light found in scene.");
     }
 
     private void ApplyWeather(WeatherConditionSO weather)
     {
-        if (weather == null) return;
+        if (weather == null)
+        {
+            Debug.LogWarning("[EnvironmentManager] ApplyWeather called with null weather.");
+            return;
+        }
 
-        // Apply Fog settings
+        // Fog
         RenderSettings.fog = true;
         RenderSettings.fogDensity = weather.fogDensity;
-        // Optional: Change Skybox tint if your shader supports it
-        // RenderSettings.skybox.SetColor("_Tint", weather.skyboxTint); 
+        RenderSettings.fogColor = weather.skyboxTint;
 
-        // Debug.Log($"Applied Weather: {weather.weatherName}");
+        // Skybox — weather always wins, called after ApplyTimeOfDay so it overwrites it
+        if (weather.skyboxMaterial != null)
+        {
+            RenderSettings.skybox = weather.skyboxMaterial;
+
+            if (weather.skyboxMaterial.HasProperty("_Tint"))
+                weather.skyboxMaterial.SetColor("_Tint", weather.skyboxTint);
+            else if (weather.skyboxMaterial.HasProperty("_SkyTint"))
+                weather.skyboxMaterial.SetColor("_SkyTint", weather.skyboxTint);
+
+            DynamicGI.UpdateEnvironment();
+            Debug.Log($"[EnvironmentManager] ✓ Skybox → '{weather.skyboxMaterial.name}' ({weather.weatherName})");
+        }
+        else
+        {
+            Debug.LogWarning($"[EnvironmentManager] Weather '{weather.weatherName}' has no skybox material assigned!");
+        }
     }
 
     private void ApplyTimeOfDay(TimeOfDaySettingsSO time)
     {
         if (time == null) return;
 
-        // Apply Light settings (Only if we found the light)
+        // Directional light
         if (mainDirectionalLight != null)
         {
             mainDirectionalLight.color = time.lightColor;
@@ -67,18 +79,14 @@ public class EnvironmentManager : MonoBehaviour
             mainDirectionalLight.shadows = time.enableShadows ? LightShadows.Soft : LightShadows.None;
         }
 
-        // Apply Ambient settings (Global settings, doesn't need light reference)
+        // Ambient
         RenderSettings.ambientIntensity = time.ambientIntensity;
 
-        // Apply Skybox
+        // Time skybox is a fallback only — ApplyWeather will overwrite this if weather has a material
         if (time.skyboxMaterial != null)
         {
             RenderSettings.skybox = time.skyboxMaterial;
+            DynamicGI.UpdateEnvironment();
         }
-
-        // Force Unity to update the lighting immediately
-        DynamicGI.UpdateEnvironment();
-
-        // Debug.Log($"Applied Time: {time.timeName}");
     }
 }

@@ -1,31 +1,31 @@
 // ============================================================================
-//  CENTRALIZED CAR CONTROLLER  v4.3
-//  ============================================================================
-//  Does NOT touch Rigidbody / move the car / handle input.
-//  Draws the player's planned route as a LineRenderer.
+//  CENTRALIZED CAR CONTROLLER  v4.3
+//  ============================================================================
+//  Does NOT touch Rigidbody / move the car / handle input.
+//  Draws the player's planned route as a LineRenderer.
 //
-//  ROUTING ALGORITHM:
-//  ─────────────────────────────────────────────────────────────────────────
-//  On reroute:
-//    1. Scan every node within nodeSearchRadius.
-//    2. Score each node: nmDist × dirBias + graphDist × 0.25
-//       Nodes ahead get 0.7× bias, behind get 1.3×. Forward preferred but
-//       backward nodes are still considered if they're the only valid path.
-//    3. Pick lowest-score node that has a valid FindPath → dest.
-//    4. Build: [carPos] ──NavMesh bridge──► [srcNode] ──graph segments──► [dest]
+//  ROUTING ALGORITHM:
+//  ─────────────────────────────────────────────────────────────────────────
+//  On reroute:
+//    1. Scan every node within nodeSearchRadius.
+//    2. Score each node: nmDist × dirBias + graphDist × 0.25
+//       Nodes ahead get 0.7× bias, behind get 1.3×. Forward preferred but
+//       backward nodes are still considered if they're the only valid path.
+//    3. Pick lowest-score node that has a valid FindPath → dest.
+//    4. Build: [carPos] ──NavMesh bridge──► [srcNode] ──graph segments──► [dest]
 //
-//  REROUTE TRIGGER:
-//    Car > offPathRerouteDistance from every remaining waypoint → reroute.
+//  REROUTE TRIGGER:
+//    Car > offPathRerouteDistance from every remaining waypoint → reroute.
 //
-//  LINE DRAWING:
-//    Forward segments always preferred.
-//    Backward on bidirectional road: allowed if no forward exists.
-//    Backward on one-way road: NEVER drawn — line hidden, reroute fires.
+//  LINE DRAWING:
+//    Forward segments always preferred.
+//    Backward on bidirectional road: allowed if no forward exists.
+//    Backward on one-way road: NEVER drawn — line hidden, reroute fires.
 //
-//  WAYPOINT GROUNDING:
-//    Every drawn point is pinned to the real road surface via downward
-//    physics raycasts (5-point cross pattern, median Y). Does NOT use
-//    NavMesh.SamplePosition for height — NavMesh bake can float above road.
+//  WAYPOINT GROUNDING:
+//    Every drawn point is pinned to the real road surface via downward
+//    physics raycasts (5-point cross pattern, median Y). Does NOT use
+//    NavMesh.SamplePosition for height — NavMesh bake can float above road.
 // ============================================================================
 
 using UnityEngine;
@@ -35,19 +35,19 @@ using System.Collections.Generic;
 [DisallowMultipleComponent]
 public class CentralizedCarController : MonoBehaviour
 {
-    // ─────────────────────────────────────────────────────────────────────────
-    //  INSPECTOR
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  INSPECTOR
+    // ─────────────────────────────────────────────────────────────────────────
 
-    [Header("═══  NAVIGATION SYSTEM  ═══")]
+    [Header("═══  NAVIGATION SYSTEM  ═══")]
     public CentralizedNavigationSystem navSystem;
 
-    [Header("═══  FIXED DESTINATION  ═══")]
+    [Header("═══  FIXED DESTINATION  ═══")]
     [Tooltip("Drag a NavNode here. Route always leads to this node.")]
     public NavNode fixedDestinationNode = null;
     private int FixedDestNodeID => fixedDestinationNode != null ? fixedDestinationNode.nodeID : -1;
 
-    [Header("═══  ROUTE VISUALIZATION  ═══")]
+    [Header("═══  ROUTE VISUALIZATION  ═══")]
     public bool showRouteVisualization = true;
 
     [Tooltip("Seconds between deviation checks.")]
@@ -62,50 +62,50 @@ public class CentralizedCarController : MonoBehaviour
     [Range(1f, 20f)]
     public float maxLineSegmentLength = 4f;
 
-    [Header("═══  NAVMESH  ═══")]
+    [Header("═══  NAVMESH  ═══")]
     public int navMeshAreaMask = NavMesh.AllAreas;
 
-    [Header("═══  WAYPOINT GROUNDING  ═══")]
+    [Header("═══  WAYPOINT GROUNDING  ═══")]
     [Tooltip("Layer mask for road/terrain surface. Set to your Road + Terrain layers.\n" +
-             "CRITICAL: exclude buildings, vehicles, props.\n" +
-             "If left as 'Everything', raycasts may hit wrong surfaces.")]
+        "CRITICAL: exclude buildings, vehicles, props.\n" +
+        "If left as 'Everything', raycasts may hit wrong surfaces.")]
     public LayerMask roadSurfaceLayer = ~0;
 
     [Tooltip("How far above car's Y position to start the downward surface raycast.\n" +
-             "30 m default handles most bridges and overpasses.")]
+        "30 m default handles most bridges and overpasses.")]
     [Range(5f, 80f)]
     public float groundRaycastOriginHeight = 30f;
 
     [Tooltip("Total downward cast distance from origin. 60 m default.\n" +
-             "Increase for deep valleys on mountain roads.")]
+        "Increase for deep valleys on mountain roads.")]
     [Range(10f, 150f)]
     public float groundRaycastTotalLength = 60f;
 
     [Tooltip("Raycast hits further than this from car's Y are rejected.\n" +
-             "Prevents snapping to rooftops or tunnels below.\n" +
-             "25 m = city hills. 80–100 m = mountain roads.")]
+        "Prevents snapping to rooftops or tunnels below.\n" +
+        "25 m = city hills. 80–100 m = mountain roads.")]
     [Range(5f, 200f)]
     public float maxHeightDeviation = 25f;
 
     [Tooltip("Line renderer sits this far above the road surface.\n" +
-             "0.15 m keeps it visible without clipping.")]
+        "0.15 m keeps it visible without clipping.")]
     [Range(0f, 1f)]
     public float lineHeightAboveRoad = 0.15f;
 
-    [Header("═══  NODE SELECTION  ═══")]
+    [Header("═══  NODE SELECTION  ═══")]
     [Tooltip("Search radius for candidate nodes when rerouting.")]
     [Range(10f, 300f)]
     public float nodeSearchRadius = 120f;
 
     [Tooltip("Reject nodes where NavMesh road distance > straight dist × this.\n" +
-             "Filters out nodes on the other side of a road divider.")]
+        "Filters out nodes on the other side of a road divider.")]
     [Range(1.2f, 6f)]
     public float nodePathRatioLimit = 3f;
 
     [Tooltip("NavMesh area mask for node reachability checks.")]
     public int nodeSelectionAreaMask = NavMesh.AllAreas;
 
-    [Header("═══  DEBUG (read-only)  ═══")]
+    [Header("═══  DEBUG (read-only)  ═══")]
     [SerializeField] private float dbgNearestWp = 0f;
     [SerializeField] private int dbgWpIndex = 0;
     [SerializeField] private int dbgWpTotal = 0;
@@ -114,31 +114,35 @@ public class CentralizedCarController : MonoBehaviour
     [SerializeField] private string dbgRouteSrc = "—";
     [SerializeField] private int dbgSrcNode = -1;
 
-    [Header("═══  TEST FOLLOW PATH  ═══")]
+    [Header("═══  TEST FOLLOW PATH  ═══")]
     public bool followPath = false;
     [Range(1f, 30f)] public float testFollowSpeed = 10f;
     [Range(1f, 10f)] public float testTurnSpeed = 4f;
     [Range(1f, 10f)] public float testWaypointReachDistance = 4f;
 
-    [Header("═══  BRAKE REACTION  ═══")]
+    [Header("═══  BRAKE REACTION  ═══")]
     public LayerMask obstacleDetectionLayer;
     [Range(5f, 60f)] public float reactionRayDistance = 20f;
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PRIVATE STATE
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  PRIVATE STATE
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private List<Vector3> _wps = new List<Vector3>();
+    private List<Vector3> _wps = new List<Vector3>();
+    // Pre-grounded copy of _wps — each point pinned to road surface at route-build
+    // time. DrawRoute reads from this instead of calling GroundPoint every frame.
+    // Zero raycasts per frame in VR.
+    private List<Vector3> _groundedWps = new List<Vector3>();
     private int _wpIdx = 0;
     private int _srcNode = -1;
     private int _dstNode = -1;
     private float _timer = 0f;
     private bool _built = false;
 
-    // Segment indices in _wps where _wps[i]→_wps[i+1] is a ONE-WAY connection.
-    // Built by MarkOneWaySegments() after every route build/reroute.
-    // DrawRoute uses this to decide whether backward drawing is allowed.
-    private HashSet<int> _oneWaySegIdx = new HashSet<int>();
+    // Segment indices in _wps where _wps[i]→_wps[i+1] is a ONE-WAY connection.
+    // Built by MarkOneWaySegments() after every route build/reroute.
+    // DrawRoute uses this to decide whether backward drawing is allowed.
+    private HashSet<int> _oneWaySegIdx = new HashSet<int>();
 
     private LineRenderer _lr = null;
     private NavMeshPath _nmWork = null;
@@ -147,19 +151,19 @@ public class CentralizedCarController : MonoBehaviour
     private bool _prevViz = true;
     private Rigidbody _rb;
 
-    // 5-point cross pattern for GroundPoint multi-sample (static, no alloc)
-    private static readonly Vector2[] _groundOffsets =
-    {
-        Vector2.zero,
-        new Vector2( 0.3f,  0f),
-        new Vector2(-0.3f,  0f),
-        new Vector2( 0f,    0.3f),
-        new Vector2( 0f,   -0.3f),
-    };
+    // 5-point cross pattern for GroundPoint multi-sample (static, no alloc)
+    private static readonly Vector2[] _groundOffsets =
+  {
+    Vector2.zero,
+    new Vector2( 0.3f, 0f),
+    new Vector2(-0.3f, 0f),
+    new Vector2( 0f,  0.3f),
+    new Vector2( 0f,  -0.3f),
+  };
     private readonly List<float> _groundHits = new List<float>(5);
 
-    // Brake reaction
-    private bool _obsLast = false;
+    // Brake reaction
+    private bool _obsLast = false;
     private float _obsSeen = -1f;
     private bool _reacted = false;
     private float _lastRt = -1f;
@@ -167,20 +171,20 @@ public class CentralizedCarController : MonoBehaviour
     private int _rtCount = 0;
     private float _rtWorst = -1f;
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  LIFECYCLE
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  LIFECYCLE
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private void Start()
+    private void Start()
     {
         if (navSystem == null)
         {
 #if UNITY_2023_1_OR_NEWER
-            navSystem = Object.FindFirstObjectByType<CentralizedNavigationSystem>();
+            navSystem = Object.FindFirstObjectByType<CentralizedNavigationSystem>();
 #else
-            navSystem = Object.FindObjectOfType<CentralizedNavigationSystem>();
+            navSystem = Object.FindObjectOfType<CentralizedNavigationSystem>();
 #endif
-            if (navSystem == null)
+            if (navSystem == null)
             {
                 Debug.LogError($"[CarCtrl] {name}: CentralizedNavigationSystem not found.");
                 enabled = false; return;
@@ -222,11 +226,11 @@ public class CentralizedCarController : MonoBehaviour
 
     private void OnDisable() { navSystem?.ClearPathVisualization(); }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  BUILD INITIAL ROUTE
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  BUILD INITIAL ROUTE
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private void BuildRoute()
+    private void BuildRoute()
     {
         int dest = FixedDestNodeID;
         if (dest >= 0)
@@ -237,8 +241,8 @@ public class CentralizedCarController : MonoBehaviour
         }
         else
         {
-            // No fixed dest — pick a route from the pool
-            int src = BestSrcNode(-1);
+            // No fixed dest — pick a route from the pool
+            int src = BestSrcNode(-1);
             if (src < 0) src = navSystem.GetClosestNode(transform.position);
             if (src < 0) return;
             var res = navSystem.RequestRoute(src);
@@ -255,18 +259,22 @@ public class CentralizedCarController : MonoBehaviour
         _built = _wps.Count >= 2;
         dbgSrcNode = _srcNode;
         navSystem.InvalidatePlayerPathCache();
-        if (_built) MarkOneWaySegments(navSystem.FindPath(_srcNode, _dstNode));
+        if (_built)
+        {
+            MarkOneWaySegments(navSystem.FindPath(_srcNode, _dstNode));
+            GroundAllWaypoints();   // pre-bake surface heights — zero raycasts per frame
+        }
 
         Debug.Log(_built
-            ? $"[CarCtrl] Route built {_wps.Count} wps | {dbgRouteSrc} | {_srcNode}→{_dstNode}"
-            : "[CarCtrl] BuildRoute FAILED — no waypoints.");
+          ? $"[CarCtrl] Route built {_wps.Count} wps | {dbgRouteSrc} | {_srcNode}→{_dstNode}"
+          : "[CarCtrl] BuildRoute FAILED — no waypoints.");
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  CHECK AND REROUTE
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  CHECK AND REROUTE
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private void CheckAndReroute()
+    private void CheckAndReroute()
     {
         if (_wps.Count == 0) return;
         TrimPassedWaypoints();
@@ -297,11 +305,11 @@ public class CentralizedCarController : MonoBehaviour
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  REROUTE
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  REROUTE
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private void Reroute()
+    private void Reroute()
     {
         if (_srcNode != -1 && _dstNode != -1)
             navSystem.ReleaseRoute(_srcNode, _dstNode);
@@ -325,37 +333,38 @@ public class CentralizedCarController : MonoBehaviour
         dbgSrcNode = _srcNode;
         navSystem.InvalidatePlayerPathCache();
         MarkOneWaySegments(navSystem.FindPath(_srcNode, _dstNode));
+        GroundAllWaypoints();   // re-bake surface heights for new route
 
-        Debug.Log($"[CarCtrl] ✅ Rerouted {_wps.Count} wps | {dbgRouteSrc} | src={_srcNode}");
+        Debug.Log($"[CarCtrl]  Rerouted {_wps.Count} wps | {dbgRouteSrc} | src={_srcNode}");
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  MAKE HYBRID ROUTE
-    //
-    //  Builds: [carPos] ──NavMesh bridge──► [srcNode] ──graph segments──► [dest]
-    //
-    //  Graph = FindPath (A*, respects one-way connections)
-    //  NavMesh bridge = CalculatePath from car to first graph node
-    //    (road geometry, handles car being mid-segment between sparse nodes)
-    //
-    //  Fallback: pure NavMesh direct path (bidirectional, may ignore one-way)
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  MAKE HYBRID ROUTE
+    //
+    //  Builds: [carPos] ──NavMesh bridge──► [srcNode] ──graph segments──► [dest]
+    //
+    //  Graph = FindPath (A*, respects one-way connections)
+    //  NavMesh bridge = CalculatePath from car to first graph node
+    //    (road geometry, handles car being mid-segment between sparse nodes)
+    //
+    //  Fallback: pure NavMesh direct path (bidirectional, may ignore one-way)
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private List<Vector3> MakeHybridRoute(Vector3 carPos, int destNodeID, out int srcNodeUsed)
+    private List<Vector3> MakeHybridRoute(Vector3 carPos, int destNodeID, out int srcNodeUsed)
     {
         srcNodeUsed = -1;
         if (!navSystem.nodeMap.ContainsKey(destNodeID)) return new List<Vector3>();
 
-        // Step 1: find best source node (forward-biased, graph-path-validated)
-        int src = BestSrcNode(destNodeID);
-        if (src < 0) src = BestSrcNodeAny(destNodeID);   // fallback: any valid node
+        // Step 1: find best source node (forward-biased, graph-path-validated)
+        int src = BestSrcNode(destNodeID);
+        if (src < 0) src = BestSrcNodeAny(destNodeID);   // fallback: any valid node
 
-        if (src >= 0)
+        if (src >= 0)
         {
             List<int> graphNodes = navSystem.FindPath(src, destNodeID);
             List<Vector3> graphWps = (graphNodes != null && graphNodes.Count >= 2)
-                                           ? navSystem.GetDenseRoute(graphNodes)
-                                           : null;
+                           ? navSystem.GetDenseRoute(graphNodes)
+                           : null;
 
             if (graphWps != null && graphWps.Count >= 2)
             {
@@ -364,15 +373,15 @@ public class CentralizedCarController : MonoBehaviour
                 var route = new List<Vector3>(graphWps.Count + 40);
                 route.Add(carPos);
 
-                // Step 2: NavMesh bridge from car to first graph waypoint
-                float gapDist = Vector3.Distance(carPos, graphWps[0]);
+                // Step 2: NavMesh bridge from car to first graph waypoint
+                float gapDist = Vector3.Distance(carPos, graphWps[0]);
                 if (gapDist > 1.5f)
                 {
                     Vector3 snapCar = Snap(carPos, navMeshAreaMask, 8f);
                     Vector3 snapGrph = Snap(graphWps[0], navMeshAreaMask, 8f);
                     bool ok = NavMesh.CalculatePath(snapCar, snapGrph, navMeshAreaMask, _nmWork)
-                              && _nmWork.status != NavMeshPathStatus.PathInvalid
-                              && _nmWork.corners.Length >= 2;
+                         && _nmWork.status != NavMeshPathStatus.PathInvalid
+                         && _nmWork.corners.Length >= 2;
                     if (ok)
                     {
                         for (int i = 1; i < _nmWork.corners.Length; i++)
@@ -380,10 +389,10 @@ public class CentralizedCarController : MonoBehaviour
                     }
                 }
 
-                // Step 3: append graph waypoints
-                int gStart = (route.Count > 1 &&
-                              Vector3.Distance(route[route.Count - 1], graphWps[0]) < 2.5f)
-                              ? 1 : 0;
+                // Step 3: append graph waypoints
+                int gStart = (route.Count > 1 &&
+               Vector3.Distance(route[route.Count - 1], graphWps[0]) < 2.5f)
+               ? 1 : 0;
                 for (int i = gStart; i < graphWps.Count; i++)
                     route.Add(graphWps[i]);
 
@@ -392,17 +401,17 @@ public class CentralizedCarController : MonoBehaviour
             }
         }
 
-        // Fallback: pure NavMesh (no one-way guarantee, better than nothing)
-        Debug.LogWarning($"[CarCtrl] Graph path failed to dest={destNodeID}. " +
-                          "Using pure NavMesh fallback (may ignore one-way roads).");
+        // Fallback: pure NavMesh (no one-way guarantee, better than nothing)
+        Debug.LogWarning($"[CarCtrl] Graph path failed to dest={destNodeID}. " +
+             "Using pure NavMesh fallback (may ignore one-way roads).");
 
         Vector3 destPos = navSystem.nodeMap[destNodeID].transform.position;
         Vector3 snapCarF = Snap(carPos, navMeshAreaMask, 8f);
         Vector3 snapDstF = Snap(destPos, navMeshAreaMask, 8f);
 
         bool fbOk = NavMesh.CalculatePath(snapCarF, snapDstF, navMeshAreaMask, _nmWork)
-                    && _nmWork.status != NavMeshPathStatus.PathInvalid
-                    && _nmWork.corners.Length >= 2;
+              && _nmWork.status != NavMeshPathStatus.PathInvalid
+              && _nmWork.corners.Length >= 2;
 
         if (fbOk)
         {
@@ -418,16 +427,16 @@ public class CentralizedCarController : MonoBehaviour
         return new List<Vector3>();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  BEST SOURCE NODE  (forward-biased scorer)
-    //
-    //  score = nmDist × dirBias + graphDist × 0.25
-    //  dirBias: ahead=0.7×, behind=1.3× — forward preferred, backward possible
-    //  Only nodes with valid FindPath(node→dest) are considered.
-    //  destNodeID = -1 skips graph check (used for random-destination init).
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  BEST SOURCE NODE  (forward-biased scorer)
+    //
+    //  score = nmDist × dirBias + graphDist × 0.25
+    //  dirBias: ahead=0.7×, behind=1.3× — forward preferred, backward possible
+    //  Only nodes with valid FindPath(node→dest) are considered.
+    //  destNodeID = -1 skips graph check (used for random-destination init).
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private int BestSrcNode(int destNodeID)
+    private int BestSrcNode(int destNodeID)
     {
         if (navSystem?.nodeMap == null) return -1;
 
@@ -447,17 +456,17 @@ public class CentralizedCarController : MonoBehaviour
             float sd = toNode.magnitude;
             if (sd > nodeSearchRadius) continue;
 
-            // NavMesh reachability + ratio filter
-            Vector3 snapNode = Snap(nodePos, nodeSelectionAreaMask, 6f);
+            // NavMesh reachability + ratio filter
+            Vector3 snapNode = Snap(nodePos, nodeSelectionAreaMask, 6f);
             bool nmOk = NavMesh.CalculatePath(snapCar, snapNode, nodeSelectionAreaMask, _nmSel)
-                        && _nmSel.status != NavMeshPathStatus.PathInvalid;
+                  && _nmSel.status != NavMeshPathStatus.PathInvalid;
             if (!nmOk) continue;
 
             float nmDist = GetPathLen(_nmSel);
             if (sd > 1f && nmDist > sd * nodePathRatioLimit) continue;
 
-            // Graph path check + distance estimation
-            float graphDist = 0f;
+            // Graph path check + distance estimation
+            float graphDist = 0f;
             if (destNodeID >= 0)
             {
                 List<int> gp = navSystem.FindPath(kvp.Key, destNodeID);
@@ -466,14 +475,14 @@ public class CentralizedCarController : MonoBehaviour
                 {
                     if (navSystem.nodeMap.ContainsKey(gp[i]) && navSystem.nodeMap.ContainsKey(gp[i + 1]))
                         graphDist += Vector3.Distance(navSystem.nodeMap[gp[i]].worldPosition,
-                                                      navSystem.nodeMap[gp[i + 1]].worldPosition);
+                                       navSystem.nodeMap[gp[i + 1]].worldPosition);
                 }
             }
 
-            // Direction bias
-            float dot = sd > 1f ? Vector3.Dot(carFwd, toNode / sd) : 1f;
+            // Direction bias
+            float dot = sd > 1f ? Vector3.Dot(carFwd, toNode / sd) : 1f;
             float dirBias = dot >= 0f ? Mathf.Lerp(1f, 0.7f, dot)
-                                      : Mathf.Lerp(1f, 1.3f, -dot);
+                         : Mathf.Lerp(1f, 1.3f, -dot);
 
             float score = nmDist * dirBias + graphDist * 0.25f;
             if (score < bestScore) { bestScore = score; best = kvp.Key; }
@@ -482,8 +491,8 @@ public class CentralizedCarController : MonoBehaviour
         return best;
     }
 
-    // Fallback: no direction bias — pure shortest graph+navmesh cost.
-    private int BestSrcNodeAny(int destNodeID)
+    // Fallback: no direction bias — pure shortest graph+navmesh cost.
+    private int BestSrcNodeAny(int destNodeID)
     {
         if (navSystem?.nodeMap == null) return -1;
 
@@ -499,7 +508,7 @@ public class CentralizedCarController : MonoBehaviour
 
             Vector3 snapNode = Snap(kvp.Value.transform.position, nodeSelectionAreaMask, 6f);
             bool nmOk = NavMesh.CalculatePath(snapCar, snapNode, nodeSelectionAreaMask, _nmSel)
-                        && _nmSel.status != NavMeshPathStatus.PathInvalid;
+                  && _nmSel.status != NavMeshPathStatus.PathInvalid;
             if (!nmOk) continue;
 
             float nmDist = GetPathLen(_nmSel);
@@ -517,11 +526,11 @@ public class CentralizedCarController : MonoBehaviour
         return best;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  TRIM PASSED WAYPOINTS
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  TRIM PASSED WAYPOINTS
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private void TrimPassedWaypoints()
+    private void TrimPassedWaypoints()
     {
         const float ON_TOP = 2f;
         Vector3 fwd = new Vector3(transform.forward.x, 0f, transform.forward.z).normalized;
@@ -538,31 +547,31 @@ public class CentralizedCarController : MonoBehaviour
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  MARK ONE-WAY SEGMENTS
-    //
-    //  Builds _oneWaySegIdx: segment indices i where _wps[i]→_wps[i+1]
-    //  corresponds to a one-way (bidirectional=false) graph connection.
-    //
-    //  Method: map each waypoint to its nearest graph node (≤4 m), propagate
-    //  forward/backward through dense sub-waypoints, then check each segment
-    //  pair against the one-way connection lookup.
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  MARK ONE-WAY SEGMENTS
+    //
+    //  Builds _oneWaySegIdx: segment indices i where _wps[i]→_wps[i+1]
+    //  corresponds to a one-way (bidirectional=false) graph connection.
+    //
+    //  Method: map each waypoint to its nearest graph node (≤4 m), propagate
+    //  forward/backward through dense sub-waypoints, then check each segment
+    //  pair against the one-way connection lookup.
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private void MarkOneWaySegments(List<int> graphNodePath)
+    private void MarkOneWaySegments(List<int> graphNodePath)
     {
         _oneWaySegIdx.Clear();
         if (graphNodePath == null || graphNodePath.Count < 2) return;
         if (navSystem?.connectionDefinitions == null) return;
 
-        // Build one-way lookup
-        var oneWaySet = new HashSet<(int, int)>();
+        // Build one-way lookup
+        var oneWaySet = new HashSet<(int, int)>();
         foreach (var conn in navSystem.connectionDefinitions)
             if (!conn.bidirectional)
                 oneWaySet.Add((conn.fromNodeID, conn.toNodeID));
 
-        // Map each waypoint index to the nearest graph node ID
-        int[] wpNode = new int[_wps.Count];
+        // Map each waypoint index to the nearest graph node ID
+        int[] wpNode = new int[_wps.Count];
         for (int i = 0; i < _wps.Count; i++) wpNode[i] = -1;
 
         foreach (int nodeID in graphNodePath)
@@ -579,20 +588,20 @@ public class CentralizedCarController : MonoBehaviour
             if (bestIdx >= 0) wpNode[bestIdx] = nodeID;
         }
 
-        // Propagate forward (dense sub-waypoints inherit left node)
-        int cur = -1;
+        // Propagate forward (dense sub-waypoints inherit left node)
+        int cur = -1;
         int[] fwd = new int[_wps.Count];
         for (int i = 0; i < _wps.Count; i++)
         { if (wpNode[i] >= 0) cur = wpNode[i]; fwd[i] = cur; }
 
-        // Propagate backward (bridge waypoints before first node get a node)
-        cur = -1;
+        // Propagate backward (bridge waypoints before first node get a node)
+        cur = -1;
         int[] bwd = new int[_wps.Count];
         for (int i = _wps.Count - 1; i >= 0; i--)
         { if (wpNode[i] >= 0) cur = wpNode[i]; bwd[i] = cur; }
 
-        // Mark one-way segments
-        for (int i = 0; i < _wps.Count - 1; i++)
+        // Mark one-way segments
+        for (int i = 0; i < _wps.Count - 1; i++)
         {
             int nA = fwd[i], nB = bwd[i + 1];
             if (nA < 0 || nB < 0 || nA == nB) continue;
@@ -600,17 +609,17 @@ public class CentralizedCarController : MonoBehaviour
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  DRAW ROUTE
-    //
-    //  Segment selection priority (matches Google Maps / Waze behaviour):
-    //    1. FORWARD  — any road type, always preferred, pick closest
-    //    2. BACKWARD on BIDIRECTIONAL road — valid fallback if no forward exists
-    //    3. BACKWARD on ONE-WAY road — NEVER drawn (physically impossible)
-    //       → line hidden, reroute fires within routeRefreshInterval
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  DRAW ROUTE
+    //
+    //  Segment selection priority (matches Google Maps / Waze behaviour):
+    //    1. FORWARD  — any road type, always preferred, pick closest
+    //    2. BACKWARD on BIDIRECTIONAL road — valid fallback if no forward exists
+    //    3. BACKWARD on ONE-WAY road — NEVER drawn (physically impossible)
+    //       → line hidden, reroute fires within routeRefreshInterval
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private void DrawRoute()
+    private void DrawRoute()
     {
         if (_lr == null) _lr = navSystem.pathLineRenderer;
         if (_lr == null) return;
@@ -634,44 +643,49 @@ public class CentralizedCarController : MonoBehaviour
 
             Vector3 toMid = ((a + b) * 0.5f) - pos; toMid.y = 0f;
             bool isForward = toMid.sqrMagnitude < 0.01f
-                             || Vector3.Dot(fwd, toMid.normalized) >= 0f;
+                    || Vector3.Dot(fwd, toMid.normalized) >= 0f;
 
             if (isForward)
             {
                 if (dist < bestFwdDist) { bestFwdDist = dist; bestFwdSeg = i; }
             }
-            else if (!_oneWaySegIdx.Contains(i))   // bidirectional backward
-            {
+            else if (!_oneWaySegIdx.Contains(i))   // bidirectional backward
+            {
                 if (dist < bestBidDist) { bestBidDist = dist; bestBidSeg = i; }
             }
-            // one-way backward: silently skipped
-        }
+            // one-way backward: silently skipped
+        }
 
         int seg;
         if (bestFwdSeg >= 0) seg = bestFwdSeg;
         else if (bestBidSeg >= 0) seg = bestBidSeg;
         else
         {
-            // Past all valid waypoints on a one-way road.
-            // Hide line — reroute will fire within routeRefreshInterval.
-            _lr.positionCount = 0;
+            // Past all valid waypoints on a one-way road.
+            // Hide line — reroute will fire within routeRefreshInterval.
+            _lr.positionCount = 0;
             _lr.enabled = false;
             return;
         }
 
-        // Project car onto chosen segment for a seamless line start
-        if (seg < _wps.Count - 1)
+        // Project car onto chosen segment for a seamless line start
+        // Use grounded Y for the projected point so it sits on the road surface
+        if (seg < _wps.Count - 1)
         {
             Vector3 a = _wps[seg], b = _wps[seg + 1], ab = b - a;
             float sqLen = ab.sqrMagnitude;
             float t = sqLen < 0.001f ? 0f : Mathf.Clamp01(Vector3.Dot(pos - a, ab) / sqLen);
             Vector3 pp = a + ab * t;
+            // Snap projected Y to road surface (single centre-point raycast is fine here
+            // since it's one point per frame, not hundreds)
+            pp = GroundPoint(pp);
             if (Vector3.Distance(pos, pp) > 0.3f) _drawBuf.Add(pp);
         }
 
-        // Remaining waypoints — ground each one to road surface
+        // Remaining waypoints — use pre-grounded cache (zero raycasts per frame)
+        int gwCount = _groundedWps.Count;
         for (int i = seg + 1; i < _wps.Count; i++)
-            _drawBuf.Add(GroundPoint(_wps[i]));
+            _drawBuf.Add(i < gwCount ? _groundedWps[i] : _wps[i]);
 
         if (_drawBuf.Count < 2) { _lr.positionCount = 0; _lr.enabled = false; return; }
 
@@ -681,29 +695,43 @@ public class CentralizedCarController : MonoBehaviour
         _lr.enabled = true;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  GROUND POINT
-    //
-    //  Pins a waypoint to the actual road surface using a 5-point cross
-    //  raycast pattern and taking the median Y — robust against seam hits.
-    //
-    //  WHY NOT NavMesh.SamplePosition:
-    //    NavMesh can bake floating above the road (visible in scene view as
-    //    a cyan surface above the tarmac). SamplePosition returns that float
-    //    height, which gets reproduced in the line renderer. We use physics
-    //    raycasts against the real mesh instead.
-    //
-    //  WHY MEDIAN (not average):
-    //    Kerb edges and junction seams can return one outlier hit. Median
-    //    ignores outliers; average would shift toward them.
-    //
-    //  ORIGIN = carY + groundRaycastOriginHeight:
-    //    Starts well above the car so the cast finds the surface below
-    //    regardless of what Y the NavMesh baked the waypoint at.
-    //    maxHeightDeviation filters out rooftops and underground geometry.
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  GROUND ALL WAYPOINTS  — called once after every route build / reroute
+    //
+    //  Populates _groundedWps by running GroundPoint on every waypoint in _wps.
+    //  DrawRoute reads _groundedWps instead of calling GroundPoint per frame,
+    //  bringing per-frame raycast cost from O(waypoints×5) down to ZERO.
+    // ─────────────────────────────────────────────────────────────────────────
+    private void GroundAllWaypoints()
+    {
+        _groundedWps.Clear();
+        for (int i = 0; i < _wps.Count; i++)
+            _groundedWps.Add(GroundPoint(_wps[i]));
+    }
 
-    private Vector3 GroundPoint(Vector3 pt)
+    // ─────────────────────────────────────────────────────────────────────────
+    //  GROUND POINT
+    //
+    //  Pins a waypoint to the actual road surface using a 5-point cross
+    //  raycast pattern and taking the median Y — robust against seam hits.
+    //
+    //  WHY NOT NavMesh.SamplePosition:
+    //    NavMesh can bake floating above the road (visible in scene view as
+    //    a cyan surface above the tarmac). SamplePosition returns that float
+    //    height, which gets reproduced in the line renderer. We use physics
+    //    raycasts against the real mesh instead.
+    //
+    //  WHY MEDIAN (not average):
+    //    Kerb edges and junction seams can return one outlier hit. Median
+    //    ignores outliers; average would shift toward them.
+    //
+    //  ORIGIN = carY + groundRaycastOriginHeight:
+    //    Starts well above the car so the cast finds the surface below
+    //    regardless of what Y the NavMesh baked the waypoint at.
+    //    maxHeightDeviation filters out rooftops and underground geometry.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private Vector3 GroundPoint(Vector3 pt)
     {
         float carY = transform.position.y;
         float originY = carY + groundRaycastOriginHeight;
@@ -714,7 +742,7 @@ public class CentralizedCarController : MonoBehaviour
         {
             Vector3 origin = new Vector3(pt.x + offset.x, originY, pt.z + offset.y);
             if (Physics.Raycast(origin, Vector3.down, out RaycastHit h,
-                                groundRaycastTotalLength, roadSurfaceLayer))
+                      groundRaycastTotalLength, roadSurfaceLayer))
             {
                 float hitY = h.point.y;
                 if (Mathf.Abs(hitY - carY) < maxHeightDeviation)
@@ -724,8 +752,8 @@ public class CentralizedCarController : MonoBehaviour
 
         if (_groundHits.Count == 0)
         {
-            // No surface hit — use car's Y (never NavMesh — it may float)
-            return new Vector3(pt.x, carY + lineHeightAboveRoad, pt.z);
+            // No surface hit — use car's Y (never NavMesh — it may float)
+            return new Vector3(pt.x, carY + lineHeightAboveRoad, pt.z);
         }
 
         _groundHits.Sort();
@@ -733,14 +761,14 @@ public class CentralizedCarController : MonoBehaviour
         return new Vector3(pt.x, medianY + lineHeightAboveRoad, pt.z);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  SUBDIVIDE SEGMENT  (with grounding)
-    //
-    //  Lerp is a straight line in 3D — it floats above slopes/curves.
-    //  Subdivide the segment and ground each intermediate point.
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  SUBDIVIDE SEGMENT  (with grounding)
+    //
+    //  Lerp is a straight line in 3D — it floats above slopes/curves.
+    //  Subdivide the segment and ground each intermediate point.
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private void AddSubdivided(List<Vector3> list, Vector3 a, Vector3 b)
+    private void AddSubdivided(List<Vector3> list, Vector3 a, Vector3 b)
     {
         int divs = Mathf.Max(1, Mathf.CeilToInt(Vector3.Distance(a, b) / maxLineSegmentLength));
         for (int s = 1; s <= divs; s++)
@@ -750,12 +778,12 @@ public class CentralizedCarController : MonoBehaviour
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  UTILITIES
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  UTILITIES
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private static Vector3 Snap(Vector3 p, int mask, float r)
-        => NavMesh.SamplePosition(p, out NavMeshHit h, r, mask) ? h.position : p;
+    private static Vector3 Snap(Vector3 p, int mask, float r)
+    => NavMesh.SamplePosition(p, out NavMeshHit h, r, mask) ? h.position : p;
 
     private static float GetPathLen(NavMeshPath p)
     {
@@ -765,11 +793,11 @@ public class CentralizedCarController : MonoBehaviour
         return l;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PUBLIC API
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  PUBLIC API
+    // ─────────────────────────────────────────────────────────────────────────
 
-    public void ForceRouteRefresh()
+    public void ForceRouteRefresh()
     {
         _built = false; _wps.Clear(); _wpIdx = 0; _srcNode = -1; _dstNode = -1;
         navSystem?.InvalidatePlayerPathCache();
@@ -790,17 +818,17 @@ public class CentralizedCarController : MonoBehaviour
     public int CurrentDestNode => _dstNode;
     public bool HasRoute => _built && _wps.Count > 0;
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  BRAKE REACTION
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  BRAKE REACTION
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private void MeasureBrakeReaction()
+    private void MeasureBrakeReaction()
     {
         if (obstacleDetectionLayer.value == 0) return;
 
         bool hit = Physics.Raycast(transform.position + Vector3.up * 0.5f,
-                                   transform.forward, reactionRayDistance,
-                                   obstacleDetectionLayer);
+                     transform.forward, reactionRayDistance,
+                     obstacleDetectionLayer);
 
         if (hit && !_obsLast) { _obsSeen = Time.time; _reacted = false; }
         if (!hit && _obsLast) { _obsSeen = -1f; _reacted = false; }
@@ -815,87 +843,87 @@ public class CentralizedCarController : MonoBehaviour
                 _rtSum += _lastRt;
                 _rtCount++;
                 if (_lastRt > _rtWorst) _rtWorst = _lastRt;
-                Debug.Log($"[CarCtrl] Reaction {_lastRt * 1000f:F0}ms  " +
-                          $"avg={GetAverageReactionTime() * 1000f:F0}ms");
+                Debug.Log($"[CarCtrl] Reaction {_lastRt * 1000f:F0}ms  " +
+                     $"avg={GetAverageReactionTime() * 1000f:F0}ms");
             }
         }
 
         _obsLast = hit;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  TEST FOLLOW PATH
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  TEST FOLLOW PATH
+    // ─────────────────────────────────────────────────────────────────────────
 
-    private void TestFollowPath()
+    private void TestFollowPath()
     {
         if (_wpIdx >= _wps.Count) { _built = false; return; }
 
         Vector3 toWp = new Vector3(_wps[_wpIdx].x - transform.position.x, 0f,
-                                   _wps[_wpIdx].z - transform.position.z);
+                     _wps[_wpIdx].z - transform.position.z);
 
         if (toWp.magnitude < testWaypointReachDistance) { _wpIdx++; return; }
 
         if (toWp.sqrMagnitude > 0.001f)
             transform.rotation = Quaternion.Slerp(transform.rotation,
-                Quaternion.LookRotation(toWp.normalized),
-                testTurnSpeed * Time.deltaTime);
+              Quaternion.LookRotation(toWp.normalized),
+              testTurnSpeed * Time.deltaTime);
 
         transform.position += transform.forward * testFollowSpeed * Time.deltaTime;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  GIZMOS
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  GIZMOS
+    // ─────────────────────────────────────────────────────────────────────────
 
 #if UNITY_EDITOR
-    private void OnDrawGizmosSelected()
+    private void OnDrawGizmosSelected()
     {
-        // Brake reaction ray
-        Gizmos.color = Color.yellow;
+        // Brake reaction ray
+        Gizmos.color = Color.yellow;
         Gizmos.DrawRay(transform.position + Vector3.up * 0.5f,
-                       transform.forward * reactionRayDistance);
+               transform.forward * reactionRayDistance);
 
-        // Current target waypoint
-        if (_wps != null && _wpIdx < _wps.Count)
+        // Current target waypoint
+        if (_wps != null && _wpIdx < _wps.Count)
         {
             Gizmos.color = Color.cyan;
             Gizmos.DrawSphere(_wps[_wpIdx], 0.4f);
             Gizmos.DrawLine(transform.position, _wps[_wpIdx]);
         }
 
-        // Off-path distance circle (orange)
-        Gizmos.color = new Color(1f, 0.55f, 0f, 0.35f);
+        // Off-path distance circle (orange)
+        Gizmos.color = new Color(1f, 0.55f, 0f, 0.35f);
         const int segs = 24;
         for (int i = 0; i < segs; i++)
         {
             float a0 = i * (360f / segs) * Mathf.Deg2Rad;
             float a1 = (i + 1) * (360f / segs) * Mathf.Deg2Rad;
             Gizmos.DrawLine(
-                transform.position + new Vector3(Mathf.Cos(a0), 0, Mathf.Sin(a0)) * offPathRerouteDistance,
-                transform.position + new Vector3(Mathf.Cos(a1), 0, Mathf.Sin(a1)) * offPathRerouteDistance);
+              transform.position + new Vector3(Mathf.Cos(a0), 0, Mathf.Sin(a0)) * offPathRerouteDistance,
+              transform.position + new Vector3(Mathf.Cos(a1), 0, Mathf.Sin(a1)) * offPathRerouteDistance);
         }
 
         if (!Application.isPlaying) return;
 
         UnityEditor.Handles.Label(
-            transform.position + Vector3.up * 3.5f,
-            $"WP {dbgWpIndex}/{dbgWpTotal}  " +
-            $"dst={(fixedDestinationNode != null ? fixedDestinationNode.name : _dstNode.ToString())}  " +
-            $"src={dbgSrcNode}\n" +
-            $"nearWp={dbgNearestWp:F1}m  {dbgRouteSrc}" +
-            (dbgRerouted ? "  ← REROUTED" : ""),
-            new GUIStyle
-            {
-                normal = new GUIStyleState
-                {
-                    textColor = dbgRerouted
-                        ? new Color(1f, 0.4f, 0.1f)
-                        : new Color(0.3f, 1f, 0.3f)
-                },
-                fontSize = 10,
-                fontStyle = FontStyle.Bold
-            });
+          transform.position + Vector3.up * 3.5f,
+          $"WP {dbgWpIndex}/{dbgWpTotal}  " +
+          $"dst={(fixedDestinationNode != null ? fixedDestinationNode.name : _dstNode.ToString())}  " +
+          $"src={dbgSrcNode}\n" +
+          $"nearWp={dbgNearestWp:F1}m  {dbgRouteSrc}" +
+          (dbgRerouted ? "  ← REROUTED" : ""),
+          new GUIStyle
+          {
+              normal = new GUIStyleState
+              {
+                  textColor = dbgRerouted
+                ? new Color(1f, 0.4f, 0.1f)
+                : new Color(0.3f, 1f, 0.3f)
+              },
+              fontSize = 10,
+              fontStyle = FontStyle.Bold
+          });
     }
 #endif
 }
